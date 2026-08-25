@@ -66,7 +66,7 @@ async function check(command: CheckCommand, streams: Streams): Promise<ExitCode>
   // The only path from a report to output. Renderers accept nothing else.
   const safe = redact(report, {
     enabled: command.redact,
-    publicValues: loaded.profile.endpoints.map((endpoint) => endpoint.host),
+    publicValues: [...loaded.profile.endpoints.map((endpoint) => endpoint.host), ...loaded.profile.doh_resolvers],
   });
 
   const rendered = render(safe, command.format);

@@ -5,6 +5,7 @@ import type { Report } from '../model/report.ts';
 import { REPORT_SCHEMA_VERSION } from '../model/report.ts';
 import type { LoadedProfile } from '../profiles/schema.ts';
 import { NetworkGuard } from '../net/guard.ts';
+import { probeErrorFinding } from './probe-error.ts';
 import { summarise, sortFindings } from './rollup.ts';
 import { TOOL_NAME, VERSION } from '../version.ts';
 import { PROBES } from './registry.ts';
@@ -114,18 +115,6 @@ async function runProbe(probe: Probe, context: ProbeContext): Promise<Finding[]>
   try {
     return await probe.run(context);
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    return [
-      {
-        id: `${probe.name}.probe-error`,
-        probe: probe.name,
-        severity: 'unknown',
-        title: `The ${probe.name} probe could not complete`,
-        evidence: [{ label: 'error', value: reason, kind: 'text' }],
-        remediation:
-          `Re-run with --timeout raised, and send this report to the tool vendor. ` +
-          `Other probes in this run are unaffected; only ${probe.name} results are missing.`,
-      },
-    ];
+    return [probeErrorFinding(probe.name, error)];
   }
 }

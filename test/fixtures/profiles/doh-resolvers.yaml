@@ -1,0 +1,18 @@
+# A profile that names its own DoH resolvers. Declaring one asserts the tool
+# uses it: the dns probe contacts it on 443 and nowhere else.
+name: Fixture DoH tool
+endpoints:
+  - host: api.example.com
+    port: 443
+    purpose: model inference
+    required: true
+    expect_streaming: true
+  - host: cdn.example.com
+    port: 443
+    purpose: asset download
+    required: false
+doh_resolvers: [cloudflare-dns.com, dns.google]
+runtimes: [node, python]
+tls:
+  min_version: "1.2"
+  interception_tolerated: false

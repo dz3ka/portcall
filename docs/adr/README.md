@@ -51,3 +51,6 @@ Numbering is sequential at creation (`NNNN-kebab-title.md`). Status is one of:
 | [0004](0004-read-only-and-credential-free-enforced-by-guardrail-tests.md) | Read-only and credential-free, enforced by guardrail tests | Accepted |
 | [0005](0005-redaction-is-a-typed-boundary-on-by-default.md) | Redaction is a typed boundary, on by default | Accepted |
 | [0006](0006-deterministic-exit-codes-with-unknown-as-degraded.md) | Deterministic exit codes, with `unknown` as degraded | Accepted |
+| [0007](0007-doh-reachability-is-profile-declared.md) | DoH reachability is profile-declared, never resolver-chosen | Accepted |
+| [0008](0008-port-derived-targets-closed-class-union-data-returning-seam.md) | Port-derived targets, closed failure classes, a data seam | Accepted |
+| [0009](0009-probe-error-evidence-is-a-closed-class-and-a-machine-code.md) | Probe errors carry a closed class and a code, never the message | Accepted |

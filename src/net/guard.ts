@@ -16,14 +16,18 @@ import type { Profile } from '../profiles/schema.ts';
  * contacted and why.
  */
 
+/** RFC 8484 fixes DoH at 443; the probe never picks a port. */
+export const DOH_PORT = 443;
+
 export class NetworkPolicyError extends Error {
   readonly host: string;
-  readonly port: number;
+  /** `null` when the denial was host-scoped, before any port was chosen. */
+  readonly port: number | null;
 
-  constructor(host: string, port: number) {
+  constructor(host: string, port: number | null) {
     super(
-      `refusing to connect to ${host}:${port}: not named in the active profile. ` +
-        `Portcall only contacts hosts the profile declares.`,
+      `refusing to connect to ${port === null ? host : `${host}:${port}`}: ` +
+        `not named in the active profile. Portcall only contacts hosts the profile declares.`,
     );
     this.name = 'NetworkPolicyError';
     this.host = host;
@@ -44,6 +48,9 @@ export class NetworkGuard {
     for (const endpoint of profile.endpoints) {
       this.permit(endpoint.host, endpoint.port, `profile endpoint: ${endpoint.purpose}`);
     }
+    // Declared, not discovered: pre-permitting here keeps `permitted()` accurate
+    // before the probe loop starts, which is the property ADR-0004 rests on.
+    for (const host of profile.doh_resolvers) this.permit(host, DOH_PORT, 'profile DoH resolver');
   }
 
   permit(host: string, port: number, reason: string): void {
@@ -63,6 +70,18 @@ export class NetworkGuard {
 
   assertAllowed(host: string, port: number): void {
     if (!this.isAllowed(host, port)) throw new NetworkPolicyError(host, port);
+  }
+
+  /**
+   * Host-scoped checks, for callers that have a host but no port yet - the DNS
+   * probe resolves a name before anything decides which port to open.
+   */
+  isHostAllowed(host: string): boolean {
+    return this.#allowed.has(host.trim().toLowerCase());
+  }
+
+  assertHostAllowed(host: string): void {
+    if (!this.isHostAllowed(host)) throw new NetworkPolicyError(host, null);
   }
 
   /** Every host this run is permitted to contact, for disclosure in the report. */

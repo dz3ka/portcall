@@ -30,6 +30,9 @@ export const profileSchema = z
   .object({
     name: z.string().min(1),
     endpoints: z.array(endpointSchema).min(1),
+    /** Optional: DoH resolvers this tool tries. Probed on 443 only; declaring one
+     *  asserts the tool uses it (SPEC.md §4 non-negotiable 3 — profile-named hosts). */
+    doh_resolvers: z.array(z.string().regex(HOSTNAME, 'must be a valid hostname')).max(4).default([]),
     runtimes: z.array(z.enum(RUNTIMES)).min(1),
     tls: z
       .object({

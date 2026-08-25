@@ -1,0 +1,1 @@
+{"ok":true,"addresses":["8.8.8.8"],"tlsProtocol":"TLSv1.3","status":400,"timing":{"dnsMs":8,"connectMs":21,"tlsMs":39,"httpMs":44}}

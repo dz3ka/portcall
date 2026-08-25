@@ -1,0 +1,1 @@
+{"ok":false,"phase":"http","code":null,"abortedBy":"phase-timeout","addresses":["93.184.216.34"],"status":null,"timing":{"dnsMs":6,"connectMs":24,"tlsMs":41,"httpMs":10000}}

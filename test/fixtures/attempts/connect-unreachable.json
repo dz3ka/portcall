@@ -1,0 +1,1 @@
+{"ok":false,"phase":"connect","code":"EHOSTUNREACH","abortedBy":null,"addresses":["10.20.30.40"],"status":null,"timing":{"dnsMs":6,"connectMs":12,"tlsMs":null,"httpMs":null}}

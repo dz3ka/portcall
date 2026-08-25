@@ -1,0 +1,1 @@
+{"ok":false,"phase":"tls","code":"ECONNRESET","abortedBy":null,"addresses":["8.8.8.8"],"status":null,"timing":{"dnsMs":8,"connectMs":19,"tlsMs":27,"httpMs":null}}

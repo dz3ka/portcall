@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readdirSync, statSync, rmSync } from 'node:fs';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { EXIT } from '../../src/cli/exit-codes.ts';
 
 /**
  * SPEC.md 4.1 / CLAUDE.md non-negotiable: no writes outside the working
@@ -59,6 +60,38 @@ function diff(before: Inventory, after: Inventory): string[] {
 
 const CLI_ENTRY = join(import.meta.dirname, '..', '..', 'src', 'cli', 'index.ts');
 
+/**
+ * The spawned run uses a loopback-only profile, not the built-in one.
+ *
+ * Portcall contacts exactly the hosts the active profile names, so a profile
+ * naming only `127.0.0.1` is what keeps this guardrail off the network - and
+ * it has to stay off it. What is under test here is where the CLI *writes*,
+ * and running the built-in profile would make the answer depend on whether the
+ * machine can reach `api.anthropic.com`: on a firewalled, offline or proxied CI
+ * runner the guardrail would fail for a reason it does not test. The whole CLI
+ * path (profile load, both probes, render, `--out`) is still exercised, which
+ * is what the write inventory is actually watching.
+ */
+const LOOPBACK_PROFILE = join(import.meta.dirname, '..', 'fixtures', 'profiles', 'loopback.yaml');
+
+/**
+ * Codes a completed `check` may exit with. `TOOL_ERROR` is excluded on
+ * purpose: it would mean the CLI never got as far as running the checks, and a
+ * run that died early proves nothing about what a real run writes.
+ *
+ * The verdict itself is deliberately not asserted - `degraded` here, `blocker`
+ * on a runner where something answers on port 9 - but "any exit code" must not
+ * become "any outcome", so a signal death, a missing status, or a crash before
+ * the report is rendered all still fail.
+ */
+const COMPLETED_EXIT_CODES: readonly number[] = [EXIT.OK, EXIT.DEGRADED, EXIT.BLOCKER];
+
+function expectCompletedRun(result: SpawnSyncReturns<string>): void {
+  expect(result.error).toBeUndefined();
+  expect(result.signal).toBeNull();
+  expect(COMPLETED_EXIT_CODES).toContain(result.status);
+}
+
 describe('no writes outside cwd guardrail', () => {
   it('running `check` writes nothing outside its own cwd', () => {
     const root = mkdtempSync(join(tmpdir(), 'portcall-guard-nowrite-'));
@@ -74,7 +107,7 @@ describe('no writes outside cwd guardrail', () => {
 
       const result = spawnSync(
         process.execPath,
-        [CLI_ENTRY, 'check', '--profile', 'generic-ai-tool', '--format', 'text'],
+        [CLI_ENTRY, 'check', '--profile', LOOPBACK_PROFILE, '--format', 'text'],
         {
           cwd: runCwd,
           env: {
@@ -91,8 +124,9 @@ describe('no writes outside cwd guardrail', () => {
         },
       );
 
-      expect(result.error).toBeUndefined();
-      expect(result.status).toBe(0);
+      expectCompletedRun(result);
+      // The rendered report on stdout is the proof the run reached the end.
+      expect(result.stdout).toContain('Loopback guardrail fixture');
 
       const after = { home: snapshot(home), temp: snapshot(sandboxTemp) };
 
@@ -117,7 +151,7 @@ describe('no writes outside cwd guardrail', () => {
 
       const result = spawnSync(
         process.execPath,
-        [CLI_ENTRY, 'check', '--profile', 'generic-ai-tool', '--format', 'json', '--out', 'report.json'],
+        [CLI_ENTRY, 'check', '--profile', LOOPBACK_PROFILE, '--format', 'json', '--out', 'report.json'],
         {
           cwd: runCwd,
           env: {
@@ -134,12 +168,14 @@ describe('no writes outside cwd guardrail', () => {
         },
       );
 
-      expect(result.error).toBeUndefined();
-      expect(result.status).toBe(0);
+      expectCompletedRun(result);
 
-      // The file was written where asked, inside cwd.
+      // The file was written where asked, inside cwd, and holds a whole report
+      // rather than whatever a half-finished run left behind.
       const cwdInventory = snapshot(runCwd);
       expect(cwdInventory['report.json']).toBeDefined();
+      const written: unknown = JSON.parse(readFileSync(join(runCwd, 'report.json'), 'utf8'));
+      expect(written).toMatchObject({ profile: { name: 'Loopback guardrail fixture' } });
 
       // Nothing outside cwd (home, sandboxed temp) changed.
       const after = { home: snapshot(home), temp: snapshot(sandboxTemp) };

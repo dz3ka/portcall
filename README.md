@@ -10,9 +10,55 @@ on their machine, and answers a single question:
 It is not a diagnostic you run after the deployment fails. It is the artifact
 you send ahead of the first call.
 
-**Status:** M0 skeleton. The CLI, profile loader, finding model, three report
-renderers and the redaction boundary exist. Probes (DNS, egress, proxy, TLS,
-trust-store) are not registered yet. Binaries are unsigned until v2.
+**Status:** M1. The CLI, profile loader, finding model, three report renderers
+and the redaction boundary landed in M0; the `dns` and `egress` probes are
+registered and run. The proxy, TLS and trust-store probes are M2–M4. Binaries
+are unsigned until v2.
+
+## What it checks today
+
+Two probes, run in that order: `dns` first, because a name that does not resolve
+makes every connection result downstream of it meaningless.
+
+**`dns`** resolves every host the profile names — once per distinct host, not
+once per endpoint — and reports:
+
+- **the host does not resolve**, with the reason in portcall's own words
+  (name not found, no address records, resolver timeout, resolver refused, or
+  unclassified) next to the resolver's own code. A blocker.
+- **the resolver hands back a block address** (`0.0.0.0`, loopback). That is a
+  deliberate sinkhole rather than a fault, and also a blocker.
+- **the host resolves to an internal address** (RFC1918, CGNAT, link-local).
+  Often a legitimate corporate VIP, sometimes a transparent proxy inserting
+  itself; degraded either way, and worth confirming with the zone's owner.
+- **resolution is slow** — 500 ms or more, which a user notices on every request
+  from a tool that re-resolves. Degraded.
+- **DoH reachability**, for each resolver the profile declares: whether the
+  resolver's HTTPS endpoint can be reached on 443 and, if not, which layer
+  stopped it. That is reachability, not proof that DoH resolution works, and
+  portcall never picks a resolver of its own — see
+  [ADR-0007](docs/adr/0007-doh-reachability-is-profile-declared.md).
+
+**`egress`** attempts every declared endpoint — resolve, TCP connect, TLS on
+443, then `GET /` — and names the layer that stopped it: DNS failure, connection
+refused, no route, timeout with no answer at all, reset mid-flight, TLS
+handshake failure, or an HTTP status that came from an intermediary instead of
+the origin. Those are different teams and different tickets, so each is its own
+finding with its own remediation. A failure portcall cannot name is reported as
+`unclassified` at severity `unknown` rather than guessed at.
+
+Endpoints the profile marks optional cap at `degraded`: an endpoint the tool
+works without never fails a customer's build.
+
+### Not yet: the proxy leg
+
+M1 attempts every endpoint **directly, and only directly**. SPEC.md §7 also asks
+for each endpoint *via the discovered proxy*; that is deliberately deferred to
+M2, because the discovery it rests on — `HTTP(S)_PROXY`, platform proxy
+settings, PAC and WPAD — is itself an M2 deliverable. A "via the proxy" verdict
+before there is a proxy probe would be a guess about which proxy. On a network
+where everything egresses through one, M1 reports endpoints as blocked and M2 is
+what explains them.
 
 ## What it does not do
 

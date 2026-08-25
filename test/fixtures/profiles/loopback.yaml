@@ -1,0 +1,24 @@
+# The profile the no-writes guardrail runs the real CLI against.
+#
+# That guardrail asks one question - does a `check` run write anything outside
+# its own working directory - and the answer must not depend on whether the
+# machine running it can reach the internet. Every endpoint here is loopback,
+# so the spawned run exercises the whole CLI path (profile load, both probes,
+# render, --out) while contacting no host off this machine: portcall only
+# contacts hosts the active profile names, so naming only 127.0.0.1 is the
+# enforcement, not a convention.
+#
+# Port 9 (discard) is chosen because nothing listens on it; a refused
+# connection is a perfectly good finding for a test that is not about
+# reachability. The endpoint is optional so the run's verdict stays
+# `degraded` rather than gating anything on a blocker.
+name: Loopback guardrail fixture
+endpoints:
+  - host: 127.0.0.1
+    port: 9
+    purpose: loopback reachability
+    required: false
+runtimes: [node]
+tls:
+  min_version: "1.2"
+  interception_tolerated: true

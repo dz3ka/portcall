@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NetworkGuard, NetworkPolicyError } from '../src/net/guard.ts';
+import { DOH_PORT, NetworkGuard, NetworkPolicyError } from '../src/net/guard.ts';
 import type { Profile } from '../src/profiles/schema.ts';
 
 function profile(overrides: Partial<Profile> = {}): Profile {
@@ -9,6 +9,7 @@ function profile(overrides: Partial<Profile> = {}): Profile {
       { host: 'api.example.com', port: 443, purpose: 'inference', required: true, expect_streaming: false },
       { host: 'registry.example.com', port: 443, purpose: 'updates', required: false, expect_streaming: false },
     ],
+    doh_resolvers: [],
     runtimes: ['node'],
     tls: { min_version: '1.2', interception_tolerated: true },
     ...overrides,
@@ -76,5 +77,35 @@ describe('NetworkGuard', () => {
     guard.permit('proxy.internal', 8080, 'discovered via WPAD');
     const hosts = guard.permitted().map((entry) => entry.host);
     expect(hosts).toEqual(['api.example.com', 'proxy.internal', 'registry.example.com']);
+  });
+
+  it('assertHostAllowed throws NetworkPolicyError for a host the profile never names', () => {
+    const guard = new NetworkGuard(profile());
+    expect(() => guard.assertHostAllowed('evil.example.com')).toThrow(NetworkPolicyError);
+  });
+
+  it('assertHostAllowed passes for a profile host on a port the profile did not declare', () => {
+    const guard = new NetworkGuard(profile());
+    expect(guard.isAllowed('api.example.com', 8080)).toBe(false);
+    expect(() => guard.assertHostAllowed('api.example.com')).not.toThrow();
+  });
+
+  it('isHostAllowed answers on host scope alone', () => {
+    const guard = new NetworkGuard(profile());
+    expect(guard.isHostAllowed('api.example.com')).toBe(true);
+    expect(guard.isHostAllowed('evil.example.com')).toBe(false);
+  });
+
+  it('isHostAllowed normalises case and surrounding whitespace like permit()', () => {
+    const guard = new NetworkGuard(profile());
+    expect(guard.isHostAllowed('  API.Example.COM  ')).toBe(true);
+  });
+
+  it('pre-permits every declared DoH resolver on 443 and on no other port', () => {
+    const guard = new NetworkGuard(profile({ doh_resolvers: ['cloudflare-dns.com', 'dns.google'] }));
+    expect(guard.isAllowed('cloudflare-dns.com', DOH_PORT)).toBe(true);
+    expect(guard.isAllowed('dns.google', DOH_PORT)).toBe(true);
+    expect(guard.isAllowed('cloudflare-dns.com', 853)).toBe(false);
+    expect(guard.isAllowed('dns.google', 80)).toBe(false);
   });
 });

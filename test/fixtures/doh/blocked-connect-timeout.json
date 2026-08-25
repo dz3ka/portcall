@@ -1,0 +1,1 @@
+{"ok":false,"phase":"connect","code":null,"abortedBy":"phase-timeout","addresses":["8.8.8.8"],"status":null,"timing":{"dnsMs":8,"connectMs":5000,"tlsMs":null,"httpMs":null}}
