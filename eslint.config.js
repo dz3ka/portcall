@@ -1,5 +1,6 @@
 // @ts-check
 import js from '@eslint/js';
+import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
@@ -31,8 +32,17 @@ export default tseslint.config(
   },
   {
     // Build/CI scripts are plain ESM run by node directly; they are not part of
-    // the typed program and do not ship in the binary.
+    // the typed program and do not ship in the binary. They still run on Node,
+    // so `no-undef` needs Node's globals declared — `nodeBuiltin` and not `node`
+    // because these are ESM and have no `require`/`__dirname`.
     files: ['scripts/**/*.mjs', 'eslint.config.js', 'vitest.config.ts'],
     ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      // Merge, don't replace: `disableTypeChecked` sets parserOptions of its own
+      // to detach these files from the typed program, and a bare override here
+      // would silently re-attach them.
+      ...tseslint.configs.disableTypeChecked.languageOptions,
+      globals: globals.nodeBuiltin,
+    },
   },
 );

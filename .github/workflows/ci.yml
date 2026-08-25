@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # portcall runs on someone else's locked-down laptop, so every check runs on
+    # all three host OSes. That includes the no-writes guardrail test, which is a
+    # normal vitest test and only means something against a real filesystem.
+    strategy:
+      fail-fast: false # a Windows-only failure must not hide a macOS one
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22 # the floor declared in package.json engines
+          cache: npm
+      - run: npm ci
+      # One step delegating to the repo's own script, so what CI runs and what a
+      # developer runs locally cannot drift apart.
+      - name: verify (profiles:check, lint, typecheck, test)
+        run: npm run verify
+
+  node-compat:
+    # Only the majors package.json claims to support (engines.node >=22.6.0).
+    # Node 20 is deliberately absent: a green run on a version the package
+    # declares unsupported is a false assurance, not extra coverage.
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # The built CLI must produce a report in every format it advertises, so
+      # each format is checked for one string only that format can produce.
+      # Exit status alone would not do it: at M0 no probes are registered, so a
+      # renderer emitting an empty string - or --format html silently falling
+      # back to text - would pass green.
+      # Output is left in the log on purpose: the shipped profile names only
+      # public vendor endpoints, so there is nothing here to redact.
+      - name: check --profile generic-ai-tool in every report format
+        run: |
+          for format in text json html; do
+            report="$RUNNER_TEMP/report.$format"
+            echo "::group::format=$format"
+            node dist/cli/index.js check --profile generic-ai-tool --format "$format" | tee "$report"
+            echo "::endgroup::"
+            case "$format" in
+              text) grep -q '^portcall ' "$report" ;;
+              json) jq -e '.schemaVersion' "$report" >/dev/null ;;
+              html) grep -qi '^<!doctype html' "$report" ;;
+            esac || { echo "::error::--format $format did not produce a $format report"; exit 1; }
+          done
+
+  binaries:
+    # bun cross-compiles all five targets from a single runner (ADR-0001), so
+    # this job is not a matrix. bun is a build-time dependency only; nothing on
+    # a customer's machine ever needs it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20 # first real exercise of the compile path: fail, don't hang
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      # Pinned to a commit, not the mutable v2 tag: this is the one third-party
+      # action in the workflow, and a tag repoint would run someone else's code
+      # in the release build. The actions/* steps above are GitHub-owned.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: npm ci
+      # Print the plan (targets, bun argv, output paths) before compiling, so a
+      # failure below can be read against the exact command that produced it.
+      - name: build plan
+        run: node scripts/build-binaries.mjs --dry-run
+      - run: npm run build:binaries
+      - uses: actions/upload-artifact@v7
+        with:
+          name: portcall-binaries
+          # A glob, not the five filenames: artifact names belong to the build
+          # script, and CI should not need editing when one of them changes.
+          path: build/binaries/**
+          if-no-files-found: error

@@ -59,6 +59,50 @@ npx portcall check --profile generic-ai-tool --format html --out portcall-report
 `--out` must land inside the current working directory. That is a trust
 property, not a convenience.
 
+### Exit codes
+
+Customers run this in their own CI, so these are API. Changing one is a
+breaking change.
+
+| Code | Meaning |
+|------|---------|
+| `0` | No blockers. The tool should work here. |
+| `1` | Degraded: it works, with limitations. |
+| `2` | At least one blocker. The tool will not work here as configured. |
+| `3` | Portcall itself failed: bad arguments, unreadable profile, internal error. |
+
+A check that ran and could not decide reports `unknown`, and `unknown` exits
+`1`, not `0`. A check that could not decide is not a pass, and a pipeline that
+goes green on one is the failure this tool exists to prevent.
+
+`3` is never produced by a finding, so "your network blocks this" and "your
+invocation is wrong" stay distinguishable.
+
+### Build from source
+
+Binaries are unsigned until v2. Until then, build it yourself:
+
+```bash
+npm ci
+npm run build
+node dist/cli/index.js check --profile generic-ai-tool
+```
+
+`npm run build` regenerates nothing you have to trust: it checks the embedded
+profiles are in sync with `profiles/` and compiles `src/` to `dist/`. The
+per-platform executables described in SPEC.md §5 are built by
+`npm run build:binaries`, which needs [bun](https://bun.sh) on PATH and
+cross-compiles all five targets plus their SHA-256 sums. CI builds all five on
+every push and keeps them as a build artifact; signed releases come at v2.
+
+## Why it is built this way
+
+Every non-obvious decision has an ADR in [docs/adr/](docs/adr/) — the context,
+the choice, the alternatives that lost, and why. Start with
+[ADR-0004](docs/adr/0004-read-only-and-credential-free-enforced-by-guardrail-tests.md)
+if what you want to know is whether the trust properties above are enforced or
+merely claimed.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
