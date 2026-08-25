@@ -1,0 +1,11 @@
+name: Fixture with duplicate endpoints
+endpoints:
+  - host: api.example.com
+    port: 443
+    purpose: model inference
+    required: true
+  - host: API.EXAMPLE.COM
+    port: 443
+    purpose: duplicate on purpose
+    required: false
+runtimes: [node]

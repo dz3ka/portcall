@@ -1,0 +1,7 @@
+name: Fixture with bad port
+endpoints:
+  - host: api.example.com
+    port: 70000
+    purpose: model inference
+    required: true
+runtimes: [node]

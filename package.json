@@ -1,0 +1,53 @@
+{
+  "name": "portcall",
+  "version": "0.1.0",
+  "description": "Enterprise deployment readiness checker for AI developer tools. Runs inside a customer network and reports exactly what is blocking a rollout.",
+  "license": "Apache-2.0",
+  "author": "Bogdan Dzekic",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dz3ka/portcall.git"
+  },
+  "homepage": "https://github.com/dz3ka/portcall#readme",
+  "bugs": {
+    "url": "https://github.com/dz3ka/portcall/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "bin": {
+    "portcall": "dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "profiles",
+    "README.md",
+    "SPEC.md",
+    "docs/adr"
+  ],
+  "scripts": {
+    "dev": "node src/cli/index.ts",
+    "profiles:embed": "node scripts/embed-profiles.mjs",
+    "profiles:check": "node scripts/embed-profiles.mjs --check",
+    "build": "npm run profiles:check && tsc -p tsconfig.build.json",
+    "build:binaries": "node scripts/build-binaries.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify": "npm run profiles:check && npm run lint && npm run typecheck && npm run test"
+  },
+  "dependencies": {
+    "yaml": "^2.6.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1",
+    "vitest": "^2.1.8"
+  }
+}

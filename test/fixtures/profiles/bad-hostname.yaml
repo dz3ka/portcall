@@ -1,0 +1,7 @@
+name: Fixture with bad hostname
+endpoints:
+  - host: "not a hostname!"
+    port: 443
+    purpose: model inference
+    required: true
+runtimes: [node]

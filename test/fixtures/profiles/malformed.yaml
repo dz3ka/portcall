@@ -1,0 +1,7 @@
+name: Fixture with malformed YAML
+endpoints:
+  - host: api.example.com
+    port: 443
+  purpose: this indentation is broken
+    required: true
+runtimes: [node

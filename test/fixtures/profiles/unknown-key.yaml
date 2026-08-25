@@ -1,0 +1,8 @@
+name: Fixture with unknown key
+endpoints:
+  - host: api.example.com
+    port: 443
+    purpose: model inference
+    required: true
+    tracking_pixel: true
+runtimes: [node]

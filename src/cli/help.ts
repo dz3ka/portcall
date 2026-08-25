@@ -1,0 +1,40 @@
+import { TOOL_NAME, VERSION } from '../version.ts';
+import { builtinProfileIds } from '../profiles/loader.ts';
+
+export function helpText(): string {
+  return [
+    `${TOOL_NAME} ${VERSION} - enterprise deployment readiness checker`,
+    '',
+    'USAGE',
+    `  ${TOOL_NAME} check --profile <name|path> [options]`,
+    `  ${TOOL_NAME} profiles`,
+    `  ${TOOL_NAME} --version`,
+    '',
+    'OPTIONS',
+    '  --profile <name|path>   Built-in profile name, or a path to a YAML profile.',
+    '  --format <json|html|text>',
+    '                          Output format. Default: text.',
+    '  --out <file>            Write the report to a file instead of stdout.',
+    '                          Must be inside the current working directory.',
+    '  --timeout <seconds>     Global budget for the whole run. Default: 60.',
+    '  --no-redact             Do not hash internal hostnames, IPs, usernames,',
+    '                          paths and serials. Internal use only; prints a',
+    '                          warning and marks the report as unredacted.',
+    '  -h, --help              Show this help.',
+    '  -v, --version           Show the version.',
+    '',
+    'EXIT CODES',
+    '  0  no blockers      1  degraded or undetermined',
+    '  2  blocker          3  portcall itself failed',
+    '',
+    'BUILT-IN PROFILES',
+    ...builtinProfileIds().map((id) => `  ${id}`),
+    '',
+    'WHAT IT DOES NOT DO',
+    '  No writes outside the working directory. No installs. No config changes.',
+    '  It never reads keychains, tokens, private keys or browser profiles, and',
+    '  never prompts for a password. It contacts only the hosts named in the',
+    '  active profile. It sends no telemetry: nothing leaves this machine.',
+    '',
+  ].join('\n');
+}

@@ -1,0 +1,18 @@
+# A deliberately minimal profile: the endpoints almost any AI developer tool
+# needs, and nothing vendor-specific. Named profiles for individual vendors are
+# separate files, added by PR rather than by release (ADR-0003).
+name: Generic AI developer tool
+endpoints:
+  - host: api.anthropic.com
+    port: 443
+    purpose: model inference
+    required: true
+    expect_streaming: true
+  - host: registry.npmjs.org
+    port: 443
+    purpose: extension updates
+    required: false
+runtimes: [node]           # which trust stores to cross-check
+tls:
+  min_version: "1.2"
+  interception_tolerated: true   # some tools work fine behind a re-signing proxy

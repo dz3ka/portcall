@@ -1,0 +1,10 @@
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+.DS_Store
+
+# Reports produced by running the tool against a real network.
+# Never commit a customer's report, redacted or not.
+portcall-report.*
