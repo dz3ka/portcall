@@ -1,0 +1,8 @@
+# The harness builds portcall's image from the repo root (see
+# test/harness/portcall.Dockerfile). Two things must not enter that context:
+# a host `node_modules`, whose platform-specific optional binaries are wrong
+# for the image's Linux userland, and build output, which the image rebuilds.
+node_modules
+dist
+build
+.git

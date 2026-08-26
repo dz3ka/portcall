@@ -65,3 +65,12 @@ Numbering is sequential at creation (`NNNN-kebab-title.md`). Status is one of:
 | [0018](0018-pac-confinement-is-a-fresh-realm-not-a-hardened-host-object.md) | PAC confinement is a fresh realm, not a hardened host object | Accepted |
 | [0019](0019-pac-worker-self-exits-before-its-own-pending-microtasks-run.md) | The PAC worker self-exits before its own pending microtasks run | Accepted |
 | [0020](0020-context-budget-guard-covers-multi-work-package-fix-rounds.md) | Context-budget guard's example set now covers multi-work-package fix rounds | Accepted |
+| [0021](0021-peculiar-x509-lands-scoped-to-parsing-not-trust.md) | `@peculiar/x509` lands, scoped to parsing and never to trust | Accepted |
+| [0022](0022-distinguished-names-are-a-redacted-evidence-kind.md) | Distinguished names are their own evidence kind, and they are redacted | Accepted |
+| [0023](0023-tls-probe-discovers-its-proxy-from-environment-variables-only.md) | The `tls` probe discovers its proxy from environment variables only | Accepted |
+| [0024](0024-tls-chain-outcome-carries-a-tunnel-phase.md) | `TlsChainOutcome` carries a `tunnel` phase of its own | Accepted |
+| [0025](0025-the-hostile-network-harness-is-a-real-network-run-outside-verify.md) | The hostile-network harness is a real network, and it runs outside `verify` | Accepted |
+| [0026](0026-a-bundled-root-counts-only-on-the-leafs-issuance-path.md) | A bundled root counts only on the leaf's issuance path | Accepted |
+| [0027](0027-a-timed-out-capture-is-its-own-finding-not-a-coded-failure-with-no-code.md) | A capture that timed out is its own finding, not a coded failure with no code | Accepted |
+| [0028](0028-the-tls-probe-is-silent-on-ports-other-than-443.md) | The `tls` probe's silence on other ports is deliberate | Accepted |
+| [0029](0029-interception-severity-is-decided-once-in-the-trust-verdict.md) | Interception severity is decided once, in the trust verdict | Accepted |

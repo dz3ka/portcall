@@ -27,8 +27,13 @@ export function severityRank(severity: Severity): number {
  * regex sweep over free text at the report boundary. A probe declares what it
  * observed; `redact/` decides what is safe to emit. A probe cannot opt out.
  *
- * - `hostname` / `ip` / `username` / `serial` / `path` / `url` are
+ * - `hostname` / `ip` / `username` / `serial` / `path` / `url` / `dn` are
  *   potentially customer-identifying and are hashed unless redaction is off.
+ * - `dn` is an X.509 distinguished name (a certificate subject or issuer). It
+ *   is its own kind because a private CA's DN routinely carries the customer's
+ *   own organisation name - `CN=Acme Corp Internal Root, O=Acme Corp` - which
+ *   is exactly the string a report must not leak. A *public* CA's name is
+ *   already public knowledge and is emitted as `public` instead.
  * - `public` is a value the vendor already knows (an endpoint named in the
  *   active profile, a public CA name) and is emitted verbatim.
  * - `text` / `number` are probe-authored descriptions with no customer data in
@@ -42,6 +47,7 @@ export type EvidenceKind =
   | 'serial'
   | 'path'
   | 'url'
+  | 'dn'
   | 'public'
   | 'text'
   | 'number';

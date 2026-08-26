@@ -1,0 +1,158 @@
+# The hostile network (SPEC.md §10, ADR-0025).
+#
+# Four planted conditions, one service each, on a network with a fixed subnet so
+# that every address in this file is also the address in the DNS zone below it:
+#
+#   dns          split-horizon answers - public names resolving to RFC1918
+#   origin       the "endpoint", serving a chain rooted in a CA nobody ships
+#   mitmproxy    a CONNECT proxy that re-signs TLS with its own generated root
+#   squid        a CONNECT proxy that demands Basic authentication
+#   nginx-proxy  a proxy that will not tunnel CONNECT for a non-443 port
+#
+# `portcall` is the suite itself and is profile-gated: `docker compose up --wait`
+# brings up the network and stops, and `docker compose run --rm portcall` runs
+# the tests *inside* it. That placement is the decision ADR-0025 records - the
+# probes need the harness's names and its resolver, and a suite on the host
+# would need a hosts-file edit to get them.
+#
+# Every image is pinned to a digest-stable tag rather than `latest`: a harness
+# that re-images itself between runs cannot be evidence of anything.
+
+name: portcall-harness
+
+networks:
+  hostile:
+    ipam:
+      config:
+        - subnet: 10.31.0.0/24
+
+volumes:
+  # mitmproxy generates its root CA on first boot and writes it here. The volume
+  # exists so the CA outlives the container and so the suite can read the same
+  # bytes the proxy is signing with (mounted read-only on `portcall` below).
+  mitm-ca:
+
+services:
+  dns:
+    build: ./dns
+    networks:
+      hostile:
+        ipv4_address: 10.31.0.53
+    healthcheck:
+      # Resolves the planted name, not just "is the process up": dnsmasq answers
+      # on the socket well before a bad config would have been noticed otherwise.
+      test: ['CMD', 'nslookup', 'api.anthropic.com', '127.0.0.1']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+  origin:
+    build: ./origin
+    networks:
+      hostile:
+        ipv4_address: 10.31.0.20
+    healthcheck:
+      # `--no-check-certificate` on purpose: the point of this service is that
+      # its chain is rooted in a CA no runtime ships, so a verifying client
+      # cannot be the readiness signal. What is proven is that nginx loaded the
+      # key pair and completed a handshake.
+      test: ['CMD', 'wget', '--no-check-certificate', '-q', '-O', '/dev/null', 'https://127.0.0.1/']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+  mitmproxy:
+    image: mitmproxy/mitmproxy:11.0.2
+    # `ssl_insecure` is not laziness: the origin below is signed by a private
+    # root, and mitmproxy verifies upstream certificates by default - without
+    # this it answers every CONNECT with a 502 and the interception scenario
+    # never happens. A real inspection appliance trusts its own corporate roots
+    # here; the harness has no store to install one into.
+    command: ['mitmdump', '--listen-host', '0.0.0.0', '--listen-port', '8080', '--set', 'ssl_insecure=true']
+    volumes:
+      - mitm-ca:/home/mitmproxy/.mitmproxy
+    dns: [10.31.0.53]
+    networks:
+      hostile:
+        ipv4_address: 10.31.0.30
+    depends_on:
+      dns: {condition: service_healthy}
+      origin: {condition: service_healthy}
+    healthcheck:
+      # Cold-start CA generation is the trap this healthcheck exists for.
+      # mitmproxy binds its listener before it has written a root CA, so "the
+      # port is open" is a lie for the first second or so of a fresh volume - a
+      # suite that raced it would capture chains signed by a CA that is about to
+      # be replaced on disk. Both halves are therefore checked: the generated CA
+      # certificate is readable, *and* the proxy accepts a CONNECT tunnel. The
+      # tunnel is not driven all the way to a handshake on purpose - mitmproxy's
+      # default lazy connection strategy answers 200 before it dials upstream,
+      # so a handshake here would be testing the origin's healthcheck twice.
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import http.client; open('/home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem').close(); c = http.client.HTTPConnection('127.0.0.1', 8080, timeout=3); c.set_tunnel('origin', 443); c.connect(); c.close()"
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  squid:
+    build: ./squid
+    dns: [10.31.0.53]
+    networks:
+      hostile:
+        ipv4_address: 10.31.0.40
+    depends_on:
+      dns: {condition: service_healthy}
+    healthcheck:
+      # Proves the *hostile condition*, not the process: squid must answer 407
+      # with a Basic challenge. curl is told to use the proxy and reports the
+      # status it got; no credential is offered here or anywhere else.
+      test: ['CMD-SHELL', 'curl -s -o /dev/null -w "%{http_code}" -x http://127.0.0.1:3128 http://api.anthropic.com/ | grep -q 407']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+  nginx-proxy:
+    image: nginx:1.27.3-alpine
+    volumes:
+      - ./nginx-proxy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      hostile:
+        ipv4_address: 10.31.0.50
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:8888/healthz']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+  portcall:
+    # Profile-gated so `up --wait` never starts it: this service is a test run,
+    # not a member of the network under test. `docker compose run --rm portcall`
+    # executes it and propagates vitest's exit code.
+    profiles: [tests]
+    build:
+      context: ../..
+      dockerfile: test/harness/portcall.Dockerfile
+    environment:
+      # The suite refuses to run anywhere this is unset, and says which command
+      # to use instead - see `test/integration/harness.ts`.
+      PORTCALL_HARNESS: '1'
+      PORTCALL_HARNESS_MITM_CA: /pki/mitm/mitmproxy-ca-cert.pem
+    volumes:
+      - mitm-ca:/pki/mitm:ro
+    dns: [10.31.0.53]
+    networks: [hostile]
+    depends_on:
+      dns: {condition: service_healthy}
+      origin: {condition: service_healthy}
+      mitmproxy: {condition: service_healthy}
+      squid: {condition: service_healthy}
+      nginx-proxy: {condition: service_healthy}
+    command: ['npm', 'run', 'test:integration']

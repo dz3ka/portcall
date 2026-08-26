@@ -107,3 +107,78 @@ export type ProxyConnectAttempt =
       abortedBy: 'phase-timeout' | 'run-signal' | null;
       timing: AttemptTiming;
     };
+
+/**
+ * The TLS capture seam (M3, ADR-0002). Capture and validation are two jobs:
+ * this seam opens the connection with certificate verification *deliberately
+ * off* and hands back the presented chain as raw DER, and a pure function over
+ * those bytes decides what the chain means. Nothing here interprets a
+ * certificate, and nothing downstream reads a runtime certificate object -
+ * that is what makes "the verdict is identical under Bun and Node" a testable
+ * claim rather than a hope.
+ *
+ * `TunnelOutcome` is deliberately *not* here: it carries a live `net.Socket`,
+ * and this file imports nothing from `node:*` so probes can depend on it
+ * without tripping the networking-import guardrail. It lives beside the
+ * function that produces it, in `proxy-connect.ts`.
+ */
+export interface TlsCaptureTiming {
+  connectMs: number | null;
+  tlsMs: number | null;
+}
+
+/**
+ * A captured chain, or the phase it died in. The phases stay separate for the
+ * same reason `EndpointAttempt`'s do (CLAUDE.md): a name that will not
+ * resolve, a port that is closed, a proxy that answered the CONNECT itself and
+ * a handshake that is being interfered with are four different tickets.
+ *
+ * `tunnel` is the one phase `EndpointAttempt` has no equivalent for, and it is
+ * here for the reason ADR-0024 gives: a capture may run over a proxy tunnel,
+ * and folding "the proxy refused" into `connect` hands the probe an `HTTP_407`
+ * wearing a transport failure's phase - the commonest enterprise case, made
+ * unrecognisable. There is no `http`: this seam never issues a request.
+ *
+ * Named rather than inline because the set is a vocabulary two other files
+ * exhaust: the tls probe's per-phase verdict tables, and the evidence-kinds
+ * guardrail, whose `Record<Union, true>` shape turns adding a phase here into
+ * a typecheck failure there rather than a widened `text` vocabulary.
+ */
+export type TlsCapturePhase = 'dns' | 'connect' | 'tunnel' | 'tls';
+
+export type TlsChainOutcome =
+  | {
+      ok: true;
+      /** Leaf first, as presented, one DER-encoded certificate per element. */
+      chainDer: readonly Uint8Array[];
+      negotiatedProtocol: string | null;
+      negotiatedCipher: string | null;
+      /** The SNI actually sent; the empty string when the target was a literal address. */
+      requestedSni: string;
+      timing: TlsCaptureTiming;
+    }
+  | {
+      ok: false;
+      /** Chronological, so a reader can see how far the capture got. */
+      phase: TlsCapturePhase;
+      code: string | null;
+      abortedBy: 'phase-timeout' | 'run-signal' | null;
+    };
+
+export interface TlsCaptureTarget {
+  host: string;
+  port: number;
+  /** Present only when capturing through a proxy CONNECT tunnel; absent means direct. */
+  viaProxy?: { host: string; port: number };
+}
+
+export interface TlsCaptureOptions {
+  signal: AbortSignal;
+  guard: NetworkGuard;
+  connectTimeoutMs: number;
+  tlsTimeoutMs: number;
+}
+
+export interface TlsCapture {
+  capture(target: TlsCaptureTarget, options: TlsCaptureOptions): Promise<TlsChainOutcome>;
+}

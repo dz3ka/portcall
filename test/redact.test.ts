@@ -11,7 +11,7 @@ function evidence(kind: EvidenceKind, value: string, label = kind): Evidence {
 }
 
 describe('redact', () => {
-  it.each<EvidenceKind>(['hostname', 'ip', 'username', 'serial', 'path', 'url'])(
+  it.each<EvidenceKind>(['hostname', 'ip', 'username', 'serial', 'path', 'url', 'dn'])(
     'hashes sensitive kind %s into a tagged token',
     (kind) => {
       const report = buildReport({}, [finding({ evidence: [evidence(kind, 'super-secret-value')] })]);

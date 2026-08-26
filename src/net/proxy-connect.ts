@@ -4,6 +4,7 @@ import type { IncomingMessage } from 'node:http';
 import { connect as netConnect } from 'node:net';
 import type { Socket } from 'node:net';
 import { extractCode, systemResolver } from './dns.ts';
+import type { NetworkGuard } from './guard.ts';
 import type { AttemptOptions, AttemptPhase, AttemptTiming, ProxyConnectAttempt } from './types.ts';
 
 /**
@@ -32,6 +33,15 @@ import type { AttemptOptions, AttemptPhase, AttemptTiming, ProxyConnectAttempt }
  * never reaches. `AttemptPhase`'s `tls` member is therefore never produced by
  * this file; `AttemptOptions.tlsTimeoutMs` is accepted (the interface is
  * shared with `endpoint.ts`) but unused here.
+ *
+ * Amendment B (M3): `openTunnel()` below is the one exception to "the socket
+ * is destroyed immediately". The `tls` probe has to capture the chain a
+ * middlebox presents *through* the proxy, which needs a tunnel that is still
+ * open when the handshake starts, so that function hands the live socket to
+ * its caller. Everything above still holds for it - same CONNECT request, same
+ * two headers, no credential of any kind, and no application data written by
+ * this file. What changes is only who closes the socket, and that is stated at
+ * the function.
  *
  * Amendment A (matching `pac-fetch.ts`'s decision, not re-litigating it):
  * `endpoint.ts`'s dns->connect phase logic is duplicated locally rather than
@@ -233,5 +243,184 @@ export async function connectDetailed(
     };
   } finally {
     socket?.destroy();
+  }
+}
+
+/**
+ * A tunnel the caller now owns, or the phase the attempt died in. No timing
+ * bag: the capture that opens a tunnel measures the whole transport leg as one
+ * `connectMs` (`TlsCaptureTiming`), and a second, differently-scoped set of
+ * numbers here would invite the two to disagree in a report.
+ */
+export type TunnelOutcome =
+  | { ok: true; socket: Socket }
+  | {
+      ok: false;
+      /**
+       * Narrower than `ProxyConnectAttempt`'s (ADR-0024): the three phases
+       * below are the only ones `openTunnel` can reach. It never runs a
+       * handshake, and a malformed CONNECT reply is a `tunnel` failure with an
+       * `HPE_*` code, not an `http` one.
+       */
+      phase: 'dns' | 'connect' | 'tunnel';
+      code: string | null;
+      status: number | null;
+      abortedBy: 'phase-timeout' | 'run-signal' | null;
+    };
+
+export interface TunnelOptions {
+  signal: AbortSignal;
+  guard: NetworkGuard;
+  /** One budget for all three phases: dns, connect, and the CONNECT round trip. */
+  connectTimeoutMs: number;
+}
+
+/**
+ * `CONNECT` over an already-connected socket, resolved with the *live* socket
+ * on a 200. The non-200 socket is destroyed here, since nothing can be done
+ * with a tunnel the proxy refused to open.
+ */
+function requestTunnel(
+  stream: Socket,
+  target: { host: string; port: number },
+  signal: AbortSignal,
+): Promise<{ status: number | null; socket: Socket | null }> {
+  return new Promise((resolve, reject) => {
+    const authority = `${target.host}:${String(target.port)}`;
+    const agent = new Agent({ keepAlive: false });
+    agent.createConnection = () => stream;
+    const request = httpRequest({
+      agent,
+      method: 'CONNECT',
+      path: authority,
+      headers: { host: authority, connection: 'close' },
+    });
+
+    const onAbort = (): void => {
+      request.destroy();
+      reject(new Error('tunnel phase aborted'));
+    };
+
+    request.on('error', (error: Error) => {
+      signal.removeEventListener('abort', onAbort);
+      reject(error);
+    });
+
+    request.on('connect', (response: IncomingMessage, socket: Socket, head: Buffer) => {
+      signal.removeEventListener('abort', onAbort);
+      const status = response.statusCode;
+      const valid = typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599;
+      if (status !== 200) {
+        socket.destroy();
+        resolve({ status: valid ? status : null, socket: null });
+        return;
+      }
+      // Node hands over whatever it had already read past the response head.
+      // A proxy that puts the first tunnelled bytes in the same TCP segment as
+      // its 200 would otherwise have them silently dropped, and the caller's
+      // handshake would stall on a stream missing its first record.
+      if (head.length > 0) socket.unshift(head);
+      resolve({ status: 200, socket });
+    });
+
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    request.end();
+  });
+}
+
+/**
+ * Open a CONNECT tunnel through `proxy` to `target` and hand the caller a live
+ * socket (M3, for the `tls` probe's through-the-proxy capture).
+ *
+ * **Ownership.** On `ok: true` the socket belongs to the caller: this function
+ * has stopped listening for anything but the permanent `ignore` error sink,
+ * and the caller must `destroy()` it. On every other path - a refused
+ * connection, a non-200 reply, a phase timeout, a cancelled run - the socket
+ * this function opened is destroyed before it returns, so a failed tunnel can
+ * never leak one.
+ *
+ * **No credentials, structurally.** `proxy` is a host and a port, not a URL.
+ * An operator's `HTTPS_PROXY` may well be `http://user:pass@proxy:3128`; the
+ * userinfo cannot survive being reduced to those two fields, so there is no
+ * parameter here a credential could travel in, nothing to strip, and nothing
+ * to accidentally log. The request itself carries the same two headers
+ * `connectDetailed` sends and no other (see the module comment); a 407 is
+ * reported, never answered.
+ */
+export async function openTunnel(
+  proxy: { host: string; port: number },
+  target: { host: string; port: number },
+  options: TunnelOptions,
+): Promise<TunnelOutcome> {
+  let socket: Socket | undefined;
+  let handedOver = false;
+
+  const abortSource = (): 'phase-timeout' | 'run-signal' => (options.signal.aborted ? 'run-signal' : 'phase-timeout');
+  const phaseSignal = (budgetMs: number): AbortSignal => AbortSignal.any([options.signal, AbortSignal.timeout(budgetMs)]);
+  const failed = (phase: 'connect' | 'tunnel', error: unknown, signal: AbortSignal): TunnelOutcome =>
+    signal.aborted
+      ? { ok: false, phase, code: null, status: null, abortedBy: abortSource() }
+      : { ok: false, phase, code: extractCode(error), status: null, abortedBy: null };
+
+  // Runtime-discovered host, same as `connectDetailed`: the proxy is not in the
+  // profile, so it is admitted explicitly, with a reason, before the first
+  // guard-gated call (SPEC.md 4.3).
+  options.guard.permit(proxy.host, proxy.port, 'proxy CONNECT tunnel');
+
+  try {
+    // --- dns ----------------------------------------------------------------
+    const dnsSignal = phaseSignal(options.connectTimeoutMs);
+    const resolved = await systemResolver.resolve(proxy.host, { signal: dnsSignal, guard: options.guard });
+    if (!resolved.ok) {
+      const abortedBy = resolved.abortedBy === null ? null : abortSource();
+      return { ok: false, phase: 'dns', code: resolved.code, status: null, abortedBy };
+    }
+    const address = resolved.addresses[0];
+    if (address === undefined) {
+      return { ok: false, phase: 'dns', code: 'ENODATA', status: null, abortedBy: null };
+    }
+
+    // --- connect ------------------------------------------------------------
+    const connectSignal = phaseSignal(options.connectTimeoutMs);
+    socket = netConnect({ host: address, port: proxy.port });
+    // Stays attached for the socket's whole life, including after hand-over:
+    // an unhandled `error` takes the process down, and this tool runs once on
+    // a stranger's laptop. A caller listening for its own errors is unaffected
+    // - `events.once` and `tls.connect` both add their own listeners.
+    socket.on('error', ignore);
+    try {
+      await once(socket, 'connect', { signal: connectSignal });
+    } catch (error) {
+      return failed('connect', error, connectSignal);
+    }
+
+    // --- tunnel -------------------------------------------------------------
+    const tunnelSignal = phaseSignal(options.connectTimeoutMs);
+    let result: { status: number | null; socket: Socket | null };
+    try {
+      result = await requestTunnel(socket, target, tunnelSignal);
+    } catch (error) {
+      return failed('tunnel', error, tunnelSignal);
+    }
+
+    if (result.socket !== null) {
+      handedOver = true;
+      return { ok: true, socket: result.socket };
+    }
+
+    return {
+      ok: false,
+      phase: 'tunnel',
+      code: result.status === null ? null : `HTTP_${String(result.status)}`,
+      status: result.status,
+      abortedBy: null,
+    };
+  } finally {
+    // The one path that does not close its socket is the one that gave it away.
+    if (!handedOver) socket?.destroy();
   }
 }

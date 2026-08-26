@@ -27,6 +27,15 @@ jobs:
           # test suite and the PAC worker load .ts files directly, so a literal 22.6
           # would fail to boot the tool at all.
           cache: npm
+      # bun is installed here even though `verify` builds no binaries. ADR-0002
+      # stakes the project on one claim - the same chain gets the same verdict
+      # under Node and under the bun-compiled binary - and
+      # test/net-root-bundle.test.ts measures it by running the same module
+      # under both runtimes. Without bun on PATH that assertion skips, and it
+      # was skipping on every runner and every laptop, which meant the claim the
+      # tool is sold on was executing nowhere. Same pinned commit as the
+      # `binaries` job below, for the same reason it is pinned there.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - run: npm ci
       # One step delegating to the repo's own script, so what CI runs and what a
       # developer runs locally cannot drift apart.
@@ -70,6 +79,45 @@ jobs:
               html) grep -qi '^<!doctype html' "$report" ;;
             esac || { echo "::error::--format $format did not produce a $format report"; exit 1; }
           done
+
+  harness:
+    # The hostile-network harness (SPEC.md §10, ADR-0025): mitmproxy re-signing
+    # with a generated root, squid demanding Basic auth, a resolver answering
+    # split-horizon, and a proxy that will not tunnel. The suite runs *inside*
+    # that network and asserts portcall names each condition.
+    #
+    # ubuntu-only, and not for convenience: the GitHub Windows and macOS runners
+    # have no Linux Docker daemon, so a matrix here would be three jobs of which
+    # two could never run. What the other two OSes are needed for - trust stores
+    # and filesystem behaviour - is covered by the `verify` matrix above, and
+    # nothing about a proxy re-signing TLS is host-OS dependent.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20 # five containers and an image build: fail, don't hang
+    steps:
+      - uses: actions/checkout@v7
+      # `--wait` is the readiness mechanism, so there is no sleep anywhere in
+      # this job or in the suite. Compose blocks until every healthcheck passes;
+      # mitmproxy's proves its generated CA is on disk, which a bare port check
+      # would not (it binds the listener before writing the root).
+      - name: bring up the hostile network
+        run: docker compose -f test/harness/docker-compose.yml up --wait
+      # `run` and not `exec`: the suite is profile-gated in the compose file so
+      # that `up --wait` never starts it, and `run --rm` propagates vitest's
+      # exit code as this step's.
+      - name: npm run test:integration (inside the harness network)
+        run: docker compose -f test/harness/docker-compose.yml run --rm portcall
+      # A red harness run is worthless without the other side of the
+      # conversation - "the tunnel returned 502" is a mitmproxy log line, not a
+      # portcall finding. Logs only on failure, so a green run stays readable.
+      - name: service logs
+        if: failure()
+        run: docker compose -f test/harness/docker-compose.yml logs --no-color --timestamps
+      # `-v` removes the mitmproxy CA volume too: the next run must generate a
+      # fresh root, because a stale one would let the cold-start path rot
+      # untested. `always()` so a failing suite still tears the network down.
+      - name: tear down
+        if: always()
+        run: docker compose -f test/harness/docker-compose.yml down -v --remove-orphans
 
   binaries:
     # bun cross-compiles all five targets from a single runner (ADR-0001), so

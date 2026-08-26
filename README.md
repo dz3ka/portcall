@@ -10,18 +10,22 @@ on their machine, and answers a single question:
 It is not a diagnostic you run after the deployment fails. It is the artifact
 you send ahead of the first call.
 
-**Status:** M2. The CLI, profile loader, finding model, three report renderers
-and the redaction boundary landed in M0; the `dns`, `egress` and `proxy`
-probes are registered and run. The TLS and trust-store probes are M3–M4.
-Binaries are unsigned until v2.
+**Status:** M3. The CLI, profile loader, finding model, three report renderers
+and the redaction boundary landed in M0; the `dns`, `egress`, `proxy` and `tls`
+probes are registered and run. The trust-store probe, and the cross-check
+between the root observed intercepting traffic and the stores each runtime
+actually reads, are M4. Binaries are unsigned until v2.
 
 ## What it checks today
 
-Three probes, run in that order: `dns` first, because a name that does not
+Four probes, run in that order: `dns` first, because a name that does not
 resolve makes every connection result downstream of it meaningless; `egress`
-second; `proxy` last, because its findings — an intermediary demanding auth, a
+second; `proxy` third, because its findings — an intermediary demanding auth, a
 PAC-discovered route — explain the `egress` blockers reported one probe
-earlier, so the reader sees the mechanism before the explanation.
+earlier, so the reader sees the mechanism before the explanation; `tls` last,
+for the same reason once more: it captures a chain through whichever proxy the
+environment names, and a reader should meet the intermediary before meeting the
+certificate it presents.
 
 **`dns`** resolves every host the profile names — once per distinct host, not
 once per endpoint — and reports:
@@ -73,6 +77,59 @@ stated up front: **portcall reports the auth scheme (Basic, NTLM or
 Negotiate) a proxy demands on a `407` response. It never authenticates** —
 see [ADR-0013](docs/adr/0013-auth-scheme-classification-cannot-construct-a-credential-header.md).
 
+**`tls`** asks what certificate chain this machine actually receives. It
+connects with verification **deliberately disabled** — the job is to observe
+what the network presents, not to accept or reject it — captures the chain, and
+evaluates it in-process over the DER bytes. Portcall parses certificates; it
+never verifies a signature and never builds a trust path
+([ADR-0021](docs/adr/0021-peculiar-x509-lands-scoped-to-parsing-not-trust.md)),
+so a chain that does not carry its own root is reported as
+`tls.root-indeterminate` rather than guessed at from the issuer name.
+
+It captures once per distinct host and port, and a second time through the
+proxy when `HTTPS_PROXY`/`HTTP_PROXY` names one. What it reports:
+
+- **where the chain anchors** — `tls.public-root` when the top of the chain is
+  a root the runtime's own bundle ships, `tls.private-root` when it is not. A
+  private root is a blocker unless the profile sets
+  `tls.interception_tolerated` or marks the endpoint optional, in which case it
+  degrades: the network is terminating TLS itself, and every runtime still has
+  to be told to trust the appliance CA before the tool works.
+- **the direct chain against the proxied one** — `tls.intercepted-via-proxy`
+  (degraded) when the two differ, `tls.chain-consistent` when they do not. This
+  is the one interception claim that rests on no trust judgement at all: two
+  different certificates for one endpoint is an observation about bytes, and it
+  is what settles an argument with a proxy team that believes the destination
+  is already in decryption bypass.
+- **the negotiated version**, against the profile's floor — `tls.protocol`,
+  `tls.protocol-below-minimum` (blocker), and `tls.protocol-unknown` when the
+  handshake reports a name portcall will not rank.
+- **validity** — `tls.chain-expired` and `tls.chain-not-yet-valid` are
+  blockers; `tls.chain-expiring-soon` fires 30 days out, degraded, because a
+  change window in a large organisation is rarely shorter than that.
+- **the name** — `tls.sni-mismatch` and `tls.leaf-no-san`, blockers, since
+  modern clients reject both outright.
+- **a capture that produced no chain** — `tls.capture-failed-dns`,
+  `tls.capture-failed-connect`, `tls.capture-failed-tunnel` and
+  `tls.capture-failed-tls`, named for the phase that died and each carrying the
+  code the layer that failed reported — an errno, or the proxy's HTTP status;
+  `tls.capture-failed-timeout` when a phase ran out of time instead, which cuts
+  across all four — silence has no code to quote, so the phase moves onto the
+  finding's evidence rather than into its id; plus
+  `tls.chain-empty`, `tls.chain-unparseable` and `tls.aborted`. Every one is
+  `unknown` and never a blocker: the failure underneath is already reported as
+  a blocker by `dns` or `egress` for the same host, and counting one broken
+  thing twice would make the summary lie about how much is wrong.
+
+Blockers cap at `degraded` on endpoints the profile marks optional, as
+everywhere else.
+
+**Only port 443 is probed.** An endpoint the profile lists on any other port is
+skipped by `tls` entirely — no chain finding, of any severity, appears for it.
+Portcall has no way to know that 8443 speaks TLS until a profile says so, and
+dialling a handshake at a plaintext service would answer a question nobody
+asked.
+
 ### Not yet: routing egress attempts through the discovered proxy
 
 The `proxy` probe discovers and validates the proxy and tests whether it will
@@ -84,6 +141,24 @@ attempt, and `proxy` is what explains why: the reader sees the mechanism
 (`egress.http-error` or a connection failure) and then the explanation
 (`proxy.reachable` or an auth challenge) one probe later, rather than a single
 finding that routes the attempt through the proxy itself.
+
+### Not yet: the `tls` probe finds its proxy in the environment only
+
+The `proxy` probe has three discovery legs — a profile-declared PAC URL, the
+environment variables, and WPAD. The `tls` probe's proxied capture has one: it
+reads `HTTPS_PROXY`/`HTTP_PROXY` and nothing else
+([ADR-0023](docs/adr/0023-tls-probe-discovers-its-proxy-from-environment-variables-only.md)).
+On a network configured only by PAC or WPAD — the common case in a large
+enterprise — `tls` captures the direct path, reports every chain verdict for
+it, and simply says nothing about the proxied path. An operator who wants the
+comparison can re-run with `HTTPS_PROXY` set.
+
+`NO_PROXY` is not consulted on that leg either, so on a network where an
+endpoint is bypassed the probe may attempt a tunnel a real client would not
+use. The proxy then either tunnels — in which case the comparison is a valid
+observation about what that proxy does to that endpoint — or refuses, which is
+reported as `tls.capture-failed-tunnel` at `unknown` and asserts nothing about
+the endpoint. The `proxy` probe reads and validates `NO_PROXY` in full.
 
 ## What it does not do
 
@@ -114,6 +189,15 @@ minutes that running this is safe will not run it.
 
 The `proxy` probe reports the auth scheme a proxy demands. It never
 authenticates.
+
+The `tls` probe turns certificate verification off on its own connections, and
+that is the check rather than a shortcut: a verifying client facing an
+interception proxy gets an error and no chain to look at, which is the useless
+outcome this tool exists to replace. Not one byte of application data is
+written to those connections — the handshake completes, the chain is copied
+out, the socket is destroyed — the trust judgement is moved downstream into a
+pure function rather than skipped, and the same profile allowlist gates the
+connection as everywhere else.
 
 ## Run
 
@@ -166,6 +250,46 @@ per-platform executables described in SPEC.md §5 are built by
 cross-compiles all five targets plus their SHA-256 sums. CI builds all five on
 every push and keeps them as a build artifact; signed releases come at v2.
 
+## The hostile network
+
+`test/harness/` is a `docker compose` network that is deliberately broken in
+the ways enterprise rollouts actually break, and a suite that runs portcall
+inside it: `mitmproxy` re-signing TLS with a root it generates on first boot,
+`squid` demanding Basic authentication, `dnsmasq` answering split-horizon, and
+an `nginx` that will not tunnel a `CONNECT`. Everything else in this repo
+judges a certificate chain somebody recorded; this judges one a real proxy is
+really re-signing, one hop away.
+
+```sh
+docker compose -f test/harness/docker-compose.yml up --wait
+docker compose -f test/harness/docker-compose.yml run --rm portcall
+docker compose -f test/harness/docker-compose.yml down -v
+```
+
+The middle command is what runs the suite — `npm run test:integration`, inside
+the network, where the harness's own resolver and names apply. Run on the host
+instead, that script refuses immediately and prints the three commands above.
+
+It is opt-in on purpose, and it is not part of `npm test` or `npm run verify`
+([ADR-0025](docs/adr/0025-the-hostile-network-harness-is-a-real-network-run-outside-verify.md)):
+portcall's whole premise is that it runs on a locked-down machine where nothing
+is installed, and a default suite needing Docker would skip on exactly those
+machines. Requires Docker with `compose` v2. CI runs it as its own Linux-only
+job: the hosted Windows and macOS runners have no Linux Docker daemon, and
+nothing about a proxy re-signing TLS is host-OS dependent.
+
+The harness is built but has not yet been executed. No machine this project has
+been developed on had Docker installed, so its first run will be the CI
+`harness` job, and until that job is green the ids and severities it asserts
+against a live `mitmproxy` and `squid` are unproven. It is a written deliverable
+with the network still ahead of it, and saying otherwise here would be the kind
+of overstatement the rest of this file avoids.
+
+[test/harness/README.md](test/harness/README.md) has the per-service table of
+which condition each one plants and which finding it provokes, the fixed
+addresses, how to debug a failing scenario, how the certificates are
+generated, and the limitations of the stand-ins, stated rather than hidden.
+
 ## Why it is built this way
 
 Every non-obvious decision has an ADR in [docs/adr/](docs/adr/) — the context,
@@ -173,6 +297,20 @@ the choice, the alternatives that lost, and why. Start with
 [ADR-0004](docs/adr/0004-read-only-and-credential-free-enforced-by-guardrail-tests.md)
 if what you want to know is whether the trust properties above are enforced or
 merely claimed.
+
+For the TLS work specifically:
+[ADR-0021](docs/adr/0021-peculiar-x509-lands-scoped-to-parsing-not-trust.md)
+takes the one new runtime dependency and scopes it to parsing, never to trust;
+[ADR-0022](docs/adr/0022-distinguished-names-are-a-redacted-evidence-kind.md)
+makes a certificate's distinguished name its own evidence kind so it is hashed
+like every other customer-owned string;
+[ADR-0023](docs/adr/0023-tls-probe-discovers-its-proxy-from-environment-variables-only.md)
+is the deliberately narrow proxy discovery described above;
+[ADR-0024](docs/adr/0024-tls-chain-outcome-carries-a-tunnel-phase.md) gives a
+failed capture a `tunnel` phase of its own, so "the proxy answered instead of
+tunnelling" never gets filed as a connect failure; and
+[ADR-0025](docs/adr/0025-the-hostile-network-harness-is-a-real-network-run-outside-verify.md)
+is why the hostile network is opt-in.
 
 ## License
 

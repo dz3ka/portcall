@@ -29,6 +29,7 @@ const SENSITIVE_KINDS: ReadonlySet<EvidenceKind> = new Set<EvidenceKind>([
   'serial',
   'path',
   'url',
+  'dn',
 ]);
 
 /** Short prefix in the emitted token, so a reader can tell what was hidden. */
@@ -39,6 +40,7 @@ const KIND_TAG: Readonly<Record<EvidenceKind, string>> = {
   serial: 'serial',
   path: 'path',
   url: 'url',
+  dn: 'dn',
   public: 'public',
   text: 'text',
   number: 'number',

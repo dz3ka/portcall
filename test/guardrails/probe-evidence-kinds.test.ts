@@ -18,6 +18,15 @@ import type { AuthScheme, PacFetchOutcome, PacFetcher } from '../../src/net/type
 import type { PacVerdict } from '../../src/probes/proxy/pac.ts';
 import type { NoProxyEntryIssue } from '../../src/probes/proxy/no-proxy.ts';
 import { runProxy } from '../../src/probes/proxy/index.ts';
+import { TLS_VERSIONS } from '../../src/profiles/schema.ts';
+import { PUBLIC_ROOT_CA_PEMS } from '../../src/net/root-bundle.ts';
+import type { TlsCapture, TlsCapturePhase, TlsChainOutcome } from '../../src/net/types.ts';
+import { compareChains, evaluateChain } from '../../src/probes/tls/evaluate.ts';
+import type { CapturedChain } from '../../src/probes/tls/evaluate.ts';
+import { runTls } from '../../src/probes/tls/index.ts';
+import { publicRootIndex } from '../../src/probes/tls/public-roots.ts';
+import type { RootReason } from '../../src/probes/tls/public-roots.ts';
+import { derOfPem, subjectOfPem, syntheticChain } from '../helpers/synthetic-chain.ts';
 
 /**
  * SPEC.md 4.5 / ADR-0005: `text` evidence crosses the redaction boundary
@@ -118,6 +127,24 @@ const NO_PROXY_ISSUES: Record<NoProxyEntryIssue, true> = {
   'wildcard-not-leading': true,
 };
 
+/** `RootReason` (M3), reported as `reason` evidence on the tls root verdict. */
+const ROOT_REASONS: Record<RootReason, true> = {
+  'bundled-root-on-path': true,
+  'self-signed-anchor-not-bundled': true,
+  'issuer-matches-no-bundled-root': true,
+  'anchor-not-presented': true,
+};
+
+/**
+ * `TlsCapturePhase` (M3), reported as `phase` evidence on a capture that timed
+ * out. Not `AttemptPhase`: the capture seam has a `tunnel` phase and no `http`
+ * one, so the two vocabularies overlap without either containing the other.
+ */
+const TLS_CAPTURE_PHASES: Record<TlsCapturePhase, true> = { dns: true, connect: true, tunnel: true, tls: true };
+
+/** Which path a chain was captured over (M3). Our own knowledge, not the peer's. */
+const CAPTURE_PATHS: Record<CapturedChain['via'], true> = { direct: true, proxy: true };
+
 const TEXT_VOCABULARY: ReadonlySet<string> = new Set([
   ...Object.keys(RESOLVE_FAILURES),
   ...Object.keys(DOH_OUTCOMES),
@@ -127,7 +154,13 @@ const TEXT_VOCABULARY: ReadonlySet<string> = new Set([
   ...Object.keys(PAC_VERDICT_KINDS),
   ...Object.keys(AUTH_SCHEMES),
   ...Object.keys(NO_PROXY_ISSUES),
+  ...Object.keys(ROOT_REASONS),
+  ...Object.keys(TLS_CAPTURE_PHASES),
+  ...Object.keys(CAPTURE_PATHS),
   ...TLS_PROTOCOLS,
+  // The profile's `tls.min_version`, echoed back as the floor a protocol failed
+  // to clear. It comes from the profile schema, never from the network.
+  ...TLS_VERSIONS,
   ...OUR_LITERALS,
 ]);
 
@@ -257,6 +290,126 @@ const HOSTILE_ERRORS: readonly unknown[] = [
   Object.assign(new Error('inspection gateway'), { name: 'CN=Corp TLS Inspection CA, O=Example Ltd' }),
 ];
 
+
+/**
+ * The tls probe's evaluation half (M3) has no fixture directory either: its
+ * input is raw DER, so the chains are built in-process. Every shape that
+ * produces a finding is covered, including the two hostile ones - a chain whose
+ * issuer DN carries a customer's organisation name, and a protocol name the
+ * peer made up.
+ */
+async function tlsFindings(): Promise<Finding[]> {
+  const roots = publicRootIndex(PUBLIC_ROOT_CA_PEMS);
+  const now = new Date('2026-08-26T00:00:00Z');
+  const publicRootPem = PUBLIC_ROOT_CA_PEMS[0] ?? '';
+
+  const publicChain = [
+    ...(await syntheticChain([
+      { subject: 'CN=api.example.com', issuer: subjectOfPem(publicRootPem), dnsNames: ['api.example.com'] },
+    ])),
+    derOfPem(publicRootPem),
+  ];
+  const privateChain = await syntheticChain([
+    { subject: 'CN=api.example.com', issuer: 'CN=Acme Corp TLS Inspection CA, O=Acme Corp Ltd', dnsNames: ['wrong.example.net'] },
+    { subject: 'CN=Acme Corp TLS Inspection CA, O=Acme Corp Ltd' },
+  ]);
+  const truncatedChain = await syntheticChain([
+    { subject: 'CN=api.example.com', issuer: 'CN=Acme Issuing CA', dnsNames: ['api.example.com'] },
+    { subject: 'CN=Acme Issuing CA', issuer: subjectOfPem(publicRootPem) },
+  ]);
+  const expiredChain = await syntheticChain([
+    {
+      subject: 'CN=api.example.com',
+      issuer: 'CN=Acme Corp TLS Inspection CA, O=Acme Corp Ltd',
+      dnsNames: ['api.example.com'],
+      notAfter: new Date('2025-01-01T00:00:00Z'),
+    },
+  ]);
+
+  const capture = (chainDer: readonly Uint8Array[], overrides: Partial<CapturedChain> = {}): CapturedChain => ({
+    chainDer,
+    negotiatedProtocol: 'TLSv1.3',
+    negotiatedCipher: 'TLS_AES_128_GCM_SHA256',
+    requestedSni: 'api.example.com',
+    via: 'direct',
+    ...overrides,
+  });
+
+  const chains = [publicChain, privateChain, truncatedChain, expiredChain, [], [new Uint8Array([0x30, 0x01, 0x00])]];
+  const protocols = ['TLSv1.3', 'TLSv1', 'TLSv9.9 (openssl 3.0.2 / corp-inspection-gw)', null];
+
+  const evaluated = chains.flatMap((chain) =>
+    protocols.flatMap((negotiatedProtocol) =>
+      [true, false].flatMap((interception_tolerated) =>
+        evaluateChain(
+          capture(chain, { negotiatedProtocol }),
+          { host: 'api.example.com', required: true },
+          { tls: { min_version: '1.2', interception_tolerated } },
+          { roots, now },
+        ),
+      ),
+    ),
+  );
+
+  return [
+    ...evaluated,
+    ...compareChains(capture(publicChain), capture(privateChain, { via: 'proxy' }), { host: 'api.example.com' }),
+    ...compareChains(capture(publicChain), capture(publicChain, { via: 'proxy' }), { host: 'api.example.com' }),
+  ];
+}
+
+/**
+ * The tls probe's *shell* (M3, WP4) is walked separately from the evaluation
+ * above, because it has `text` evidence of its own: the path a capture took,
+ * the `code` a capture that never completed died with, and the `phase` a
+ * capture that timed out gave up in. Every outcome the capture seam can return
+ * is driven through it - the four phases, two of them timed out so `phase` is
+ * walked with `tunnel` among its values, a cancelled run, and a successful
+ * capture over both paths carrying a chain whose issuer names a customer.
+ */
+async function tlsShellFindings(): Promise<Finding[]> {
+  const chainDer = await syntheticChain([
+    { subject: 'CN=api.example.com', issuer: 'CN=Acme Corp TLS Inspection CA, O=Acme Corp Ltd', dnsNames: ['api.example.com'] },
+    { subject: 'CN=Acme Corp TLS Inspection CA, O=Acme Corp Ltd' },
+  ]);
+
+  const outcomes: readonly TlsChainOutcome[] = [
+    {
+      ok: true,
+      chainDer,
+      // A protocol name the peer made up, and a cipher we never report.
+      negotiatedProtocol: 'TLSv9.9 (openssl 3.0.2 / corp-inspection-gw)',
+      negotiatedCipher: 'TLS_AES_128_GCM_SHA256',
+      requestedSni: 'api.example.com',
+      timing: { connectMs: 4, tlsMs: 9 },
+    },
+    { ok: false, phase: 'dns', code: 'ENOTFOUND', abortedBy: null },
+    { ok: false, phase: 'connect', code: null, abortedBy: 'phase-timeout' },
+    { ok: false, phase: 'tunnel', code: 'HTTP_407', abortedBy: null },
+    { ok: false, phase: 'tunnel', code: null, abortedBy: 'phase-timeout' },
+    { ok: false, phase: 'tls', code: 'ECONNRESET', abortedBy: null },
+    { ok: false, phase: 'tls', code: null, abortedBy: 'run-signal' },
+  ];
+
+  const capturerStub = (outcome: TlsChainOutcome): TlsCapture => ({
+    capture: (): Promise<TlsChainOutcome> => Promise.resolve(outcome),
+  });
+
+  const findings = await Promise.all(
+    outcomes.map((outcome) =>
+      // A proxy in the environment, so both the direct and the proxied path
+      // report - `connection` evidence has two values and only two.
+      runTls(
+        context(loaded([endpoint()])),
+        capturerStub(outcome),
+        { HTTPS_PROXY: 'http://proxy.corp.internal:8080' },
+        new Date('2026-08-26T00:00:00Z'),
+      ),
+    ),
+  );
+  return findings.flat();
+}
+
 describe('probe evidence kinds guardrail', () => {
   it('no engine probe-error finding carries text evidence from outside our own vocabulary', () => {
     const findings = HOSTILE_ERRORS.map((error) => probeErrorFinding('egress', error));
@@ -362,6 +515,41 @@ describe('probe evidence kinds guardrail', () => {
     const findings = await runEgress(context(loaded([endpoint()])), proberStub(attempt));
 
     expect(textValues(findings)).toEqual(['TLSv1.3']);
+  });
+
+  it('no tls finding carries text evidence from outside our own vocabulary', async () => {
+    const findings = await tlsFindings();
+
+    expect(findings.length).toBeGreaterThan(0);
+    expect(offenders(findings)).toEqual([]);
+  });
+
+  it('no tls probe-shell finding carries text evidence from outside our own vocabulary', async () => {
+    const findings = await tlsShellFindings();
+
+    expect(findings.length).toBeGreaterThan(0);
+    expect(offenders(findings)).toEqual([]);
+  });
+
+  /**
+   * The reason `dn` exists as a kind (M3): a private CA's distinguished name is
+   * the customer's own organisation name. `text` would cross the redaction
+   * boundary in the clear, and `hostname` would be mislabelled `<host:...>` in
+   * the report. So every DN-shaped value has to be `dn` - or `public`, which is
+   * reserved for a root that matched the runtime's own bundle and is therefore
+   * already public knowledge.
+   */
+  it('never carries a distinguished name under a kind that would leak or mislabel it', async () => {
+    const named = (await tlsFindings())
+      .flatMap((finding) => finding.evidence.map((evidence) => ({ finding, evidence })))
+      .filter(({ evidence }) => /(^|,\s*)(CN|O|OU)=/.test(evidence.value));
+
+    expect(named.length).toBeGreaterThan(0);
+    expect(
+      named
+        .filter(({ evidence }) => evidence.kind !== 'dn' && evidence.kind !== 'public')
+        .map(({ finding, evidence }) => `${finding.id}: ${evidence.label} is ${evidence.kind}`),
+    ).toEqual([]);
   });
 
   it('would reject a remote string that reached code evidence', () => {
