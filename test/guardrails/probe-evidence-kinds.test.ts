@@ -13,6 +13,11 @@ import type { AddressClass } from '../../src/probes/dns/analyse.ts';
 import type { DohOutcome, ResolveFailure } from '../../src/probes/dns/index.ts';
 import { runDns } from '../../src/probes/dns/index.ts';
 import { runEgress } from '../../src/probes/egress/index.ts';
+import type { ProxyConnectDetail } from '../../src/net/proxy-connect.ts';
+import type { AuthScheme, PacFetchOutcome, PacFetcher } from '../../src/net/types.ts';
+import type { PacVerdict } from '../../src/probes/proxy/pac.ts';
+import type { NoProxyEntryIssue } from '../../src/probes/proxy/no-proxy.ts';
+import { runProxy } from '../../src/probes/proxy/index.ts';
 
 /**
  * SPEC.md 4.5 / ADR-0005: `text` evidence crosses the redaction boundary
@@ -97,12 +102,31 @@ const TLS_PROTOCOLS = ['SSLv3', 'TLSv1', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3'] as con
 /** Our own stand-in for "the OS gave us no code". Never a remote string. */
 const OUR_LITERALS = ['unavailable'] as const;
 
+/** `PacVerdict.kind` (M2), reported as `pac verdict` evidence on an inconclusive PAC result. */
+const PAC_VERDICT_KINDS: Record<PacVerdict['kind'], true> = { proxy: true, direct: true, unresolved: true, error: true };
+
+/** `AuthScheme` (M2), reported as `auth scheme` evidence - never the raw `Proxy-Authenticate` value. */
+const AUTH_SCHEMES: Record<AuthScheme, true> = { Basic: true, NTLM: true, Negotiate: true, none: true, unknown: true };
+
+/** `NoProxyEntryIssue` (M2), reported as `issue` evidence on a malformed NO_PROXY entry. */
+const NO_PROXY_ISSUES: Record<NoProxyEntryIssue, true> = {
+  ok: true,
+  empty: true,
+  'contains-scheme': true,
+  'contains-port-with-wildcard': true,
+  'invalid-hostname': true,
+  'wildcard-not-leading': true,
+};
+
 const TEXT_VOCABULARY: ReadonlySet<string> = new Set([
   ...Object.keys(RESOLVE_FAILURES),
   ...Object.keys(DOH_OUTCOMES),
   ...Object.keys(ADDRESS_CLASSES),
   ...Object.keys(ATTEMPT_PHASES),
   ...Object.keys(PROBE_ERROR_CLASSES),
+  ...Object.keys(PAC_VERDICT_KINDS),
+  ...Object.keys(AUTH_SCHEMES),
+  ...Object.keys(NO_PROXY_ISSUES),
   ...TLS_PROTOCOLS,
   ...OUR_LITERALS,
 ]);
@@ -270,6 +294,43 @@ describe('probe evidence kinds guardrail', () => {
     ).flat();
     expect(findings.length).toBeGreaterThan(0);
     expect(offenders(findings)).toEqual([]);
+  });
+
+  it('no proxy finding carries text evidence from outside our own vocabulary', async () => {
+    const profile: LoadedProfile = {
+      id: 'fixture',
+      source: 'builtin',
+      profile: {
+        name: 'Fixture profile',
+        endpoints: [endpoint({ host: 'a.example.com' }), endpoint({ host: 'b.example.com', port: 80, required: false })],
+        doh_resolvers: [],
+        runtimes: ['node'],
+        tls: { min_version: '1.2', interception_tolerated: true },
+        proxy: { pac_url: 'https://pac.corp.internal/proxy.pac' },
+      },
+    };
+
+    const noTiming = { dnsMs: null, connectMs: null, tlsMs: null, httpMs: null };
+    const pacFetcher: PacFetcher = {
+      fetch: (): Promise<PacFetchOutcome> =>
+        Promise.resolve({
+          ok: true,
+          script: 'function FindProxyForURL(url, host) { return "PROXY proxy.corp.internal:8080"; }',
+          elapsedMs: 4,
+        }),
+    };
+    const connect = (): Promise<ProxyConnectDetail> =>
+      Promise.resolve({
+        attempt: { ok: false, phase: 'tunnel' as const, code: 'HTTP_407', status: 407, abortedBy: null, timing: noTiming },
+        // A realm/token-bearing header, exactly the shape that must never survive into evidence.
+        proxyAuthenticate: 'NTLM TlRMTVNTUAABAAAA, Basic realm="do-not-leak-this-realm"',
+      });
+
+    const findings = await runProxy(context(profile), resolverStub({ ok: true, addresses: ['93.184.216.34'], elapsedMs: 5 }), pacFetcher, connect);
+
+    expect(findings.length).toBeGreaterThan(0);
+    expect(offenders(findings)).toEqual([]);
+    expect(JSON.stringify(findings)).not.toMatch(/do-not-leak-this-realm|TlRMTVNTUAABAAAA/);
   });
 
   it('drops a TLS protocol name it does not recognise rather than reporting it', async () => {

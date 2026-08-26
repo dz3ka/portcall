@@ -20,6 +20,11 @@ const FORBIDDEN_PATTERNS: readonly RegExp[] = [
   /cookies\.sqlite/i,
   /\breadline\b/i,
   /wincred/i,
+  // SPEC.md 4 / CLAUDE.md: the proxy probe reports the auth scheme a proxy
+  // demands (`Proxy-Authenticate`) but never authenticates - no code path may
+  // construct a `Proxy-Authorization` or bare `Authorization` request header.
+  /proxy-authorization/i,
+  /['"`]?authorization['"`]?\s*:/i,
 ];
 
 /**
@@ -61,5 +66,20 @@ describe('no credential access guardrail', () => {
     const text = await readFile(join(SRC_ROOT, 'cli', 'help.ts'), 'utf8');
     expect(text).toContain('never reads keychains');
     expect(text).not.toMatch(/require\(|from\s+['"].*keychain/i);
+  });
+
+  it('the proxy-authorization patterns actually trip on realistic offending code', () => {
+    // Planted only in this string, never in src/: proves the two new patterns
+    // fire on the exact shapes an accidental auth header would take, using
+    // the identical regex objects (and `.test()` call) the real scan uses.
+    const offendingSnippets = [
+      'headers["Proxy-Authorization"] = `Basic ${credentials}`;',
+      "request.setHeader('proxy-authorization', digest);",
+      "const headers = { authorization: `Bearer ${token}` };",
+    ];
+    for (const snippet of offendingSnippets) {
+      const matched = FORBIDDEN_PATTERNS.some((pattern) => pattern.test(snippet));
+      expect(matched).toBe(true);
+    }
   });
 });

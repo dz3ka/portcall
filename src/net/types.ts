@@ -65,3 +65,45 @@ export type DnsOutcome =
 export interface DnsResolver {
   resolve(host: string, options: { signal: AbortSignal; guard: NetworkGuard }): Promise<DnsOutcome>;
 }
+
+/**
+ * The proxy seam (M2). `PacFetcher` fetches a PAC script over the same
+ * phase-classified model as `EndpointAttempt`; `ProxyConnectAttempt` is the
+ * outcome of one CONNECT attempt against a proxy, produced by
+ * `connectDetailed` in `proxy-connect.ts` alongside the raw
+ * `Proxy-Authenticate` header it never interprets (SPEC.md §4 — the probe
+ * reports the scheme demanded and never authenticates).
+ */
+export type PacFetchOutcome =
+  | { ok: true; script: string; elapsedMs: number }
+  | {
+      ok: false;
+      phase: 'dns' | 'connect' | 'tls' | 'http';
+      code: string | null;
+      abortedBy: 'phase-timeout' | 'run-signal' | null;
+      elapsedMs: number;
+    };
+
+export interface PacFetcher {
+  fetch(url: string, options: { signal: AbortSignal; guard: NetworkGuard; maxBytes: number }): Promise<PacFetchOutcome>;
+}
+
+export type AuthScheme = 'Basic' | 'NTLM' | 'Negotiate' | 'none' | 'unknown';
+
+/**
+ * No `authScheme` member: the scheme is not something this seam can know.
+ * Classifying one means reading the raw `Proxy-Authenticate` header, which
+ * travels on `ProxyConnectDetail` and is interpreted by
+ * `probes/proxy/auth.ts` — the transport/judgment split every other seam in
+ * this file keeps.
+ */
+export type ProxyConnectAttempt =
+  | { ok: true; status: number; timing: AttemptTiming }
+  | {
+      ok: false;
+      phase: AttemptPhase | 'tunnel';
+      code: string | null;
+      status: number | null;
+      abortedBy: 'phase-timeout' | 'run-signal' | null;
+      timing: AttemptTiming;
+    };

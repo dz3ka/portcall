@@ -41,6 +41,8 @@ export const profileSchema = z
       })
       .strict()
       .default({ min_version: '1.2', interception_tolerated: true }),
+    /** Optional: a PAC URL the proxy probe (M2) fetches to discover proxy behaviour. */
+    proxy: z.object({ pac_url: z.string().url().optional() }).strict().optional(),
   })
   .strict();
 

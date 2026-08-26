@@ -10,15 +10,18 @@ on their machine, and answers a single question:
 It is not a diagnostic you run after the deployment fails. It is the artifact
 you send ahead of the first call.
 
-**Status:** M1. The CLI, profile loader, finding model, three report renderers
-and the redaction boundary landed in M0; the `dns` and `egress` probes are
-registered and run. The proxy, TLS and trust-store probes are M2–M4. Binaries
-are unsigned until v2.
+**Status:** M2. The CLI, profile loader, finding model, three report renderers
+and the redaction boundary landed in M0; the `dns`, `egress` and `proxy`
+probes are registered and run. The TLS and trust-store probes are M3–M4.
+Binaries are unsigned until v2.
 
 ## What it checks today
 
-Two probes, run in that order: `dns` first, because a name that does not resolve
-makes every connection result downstream of it meaningless.
+Three probes, run in that order: `dns` first, because a name that does not
+resolve makes every connection result downstream of it meaningless; `egress`
+second; `proxy` last, because its findings — an intermediary demanding auth, a
+PAC-discovered route — explain the `egress` blockers reported one probe
+earlier, so the reader sees the mechanism before the explanation.
 
 **`dns`** resolves every host the profile names — once per distinct host, not
 once per endpoint — and reports:
@@ -50,15 +53,37 @@ finding with its own remediation. A failure portcall cannot name is reported as
 Endpoints the profile marks optional cap at `degraded`: an endpoint the tool
 works without never fails a customer's build.
 
-### Not yet: the proxy leg
+**`proxy`** discovers which proxy, if any, this machine is expected to use for
+each declared endpoint, and whether that proxy actually tunnels traffic to it.
+Discovery follows a fixed precedence: an explicit `proxy.pac_url` in the
+profile, if set, beats the `HTTP_PROXY`/`HTTPS_PROXY` environment variables,
+which beat a PAC file discovered via WPAD (`http://wpad/wpad.dat`, DNS-based
+only — see [ADR-0016](docs/adr/0016-wpad-discovery-is-dns-based-only-not-dhcp-option-252.md)),
+which falls back to "no proxy configured" as an informational finding.
+`NO_PROXY` is read and validated for syntax regardless of which leg resolves
+the proxy, and a bypassed endpoint is reported as such. Once a proxy is
+known, portcall tests `CONNECT` to it once per distinct `(host, port)` pair —
+not once per endpoint that routes through it — and reports whether the tunnel
+opens, is refused, times out, or is torn down, with the same DNS/refused/
+unreachable/timeout/reset vocabulary `egress` uses, so the same failure means
+the same team on either probe.
 
-M1 attempts every endpoint **directly, and only directly**. SPEC.md §7 also asks
-for each endpoint *via the discovered proxy*; that is deliberately deferred to
-M2, because the discovery it rests on — `HTTP(S)_PROXY`, platform proxy
-settings, PAC and WPAD — is itself an M2 deliverable. A "via the proxy" verdict
-before there is a proxy probe would be a guess about which proxy. On a network
-where everything egresses through one, M1 reports endpoints as blocked and M2 is
-what explains them.
+Plainly, because this is exactly the kind of thing a security team needs
+stated up front: **portcall reports the auth scheme (Basic, NTLM or
+Negotiate) a proxy demands on a `407` response. It never authenticates** —
+see [ADR-0013](docs/adr/0013-auth-scheme-classification-cannot-construct-a-credential-header.md).
+
+### Not yet: routing egress attempts through the discovered proxy
+
+The `proxy` probe discovers and validates the proxy and tests whether it will
+tunnel to each destination, but `egress`'s own endpoint attempts remain
+**direct, and only direct** — SPEC.md §7's "each endpoint via the discovered
+proxy" leg is still deferred. On a network where everything egresses through a
+proxy, `egress` still reports those endpoints as blocked from a direct
+attempt, and `proxy` is what explains why: the reader sees the mechanism
+(`egress.http-error` or a connection failure) and then the explanation
+(`proxy.reachable` or an auth challenge) one probe later, rather than a single
+finding that routes the attempt through the proxy itself.
 
 ## What it does not do
 
@@ -87,8 +112,8 @@ minutes that running this is safe will not run it.
 5. **Auditable.** Public source. Every check has a documented rationale and
    remediation.
 
-The proxy probe, when it exists, will report the auth scheme demanded. It will
-never authenticate.
+The `proxy` probe reports the auth scheme a proxy demands. It never
+authenticates.
 
 ## Run
 

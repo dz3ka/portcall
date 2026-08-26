@@ -4,7 +4,7 @@ import { systemResolver } from '../../net/dns.ts';
 import { endpointProber } from '../../net/endpoint.ts';
 import { DOH_PORT } from '../../net/guard.ts';
 import type { DnsOutcome, DnsResolver, EndpointAttempt, EndpointProber } from '../../net/types.ts';
-import { cap } from '../egress/classify.ts';
+import { cap } from '../shared/severity.ts';
 import { SLOW_RESOLUTION_MS, classifyAddress } from './analyse.ts';
 
 /**

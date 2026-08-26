@@ -5,7 +5,16 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['dist/**', 'node_modules/**', 'build/**', 'coverage/**'],
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      'build/**',
+      'coverage/**',
+      // Fixture PAC scripts (test/proxy-pac.test.ts): real, standalone
+      // JavaScript text read as fixtures, not part of the tsconfig program -
+      // one is deliberately syntactically invalid to prove error handling.
+      'test/fixtures/pac/**',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,

@@ -54,3 +54,14 @@ Numbering is sequential at creation (`NNNN-kebab-title.md`). Status is one of:
 | [0007](0007-doh-reachability-is-profile-declared.md) | DoH reachability is profile-declared, never resolver-chosen | Accepted |
 | [0008](0008-port-derived-targets-closed-class-union-data-returning-seam.md) | Port-derived targets, closed failure classes, a data seam | Accepted |
 | [0009](0009-probe-error-evidence-is-a-closed-class-and-a-machine-code.md) | Probe errors carry a closed class and a code, never the message | Accepted |
+| [0010](0010-pac-evaluation-via-node-vm-zero-new-dependency.md) | PAC evaluation via `node:vm`, zero new dependency | Accepted |
+| [0011](0011-pac-sandbox-hardening-defends-a-distinct-attack-per-item.md) | PAC sandbox hardening, one item per distinct attack | Superseded by ADR-0018 |
+| [0012](0012-pac-helpers-resolve-only-the-pre-resolved-target-host.md) | PAC helpers resolve only the pre-resolved target host | Accepted |
+| [0013](0013-auth-scheme-classification-cannot-construct-a-credential-header.md) | Auth-scheme classification cannot construct a credential header | Accepted |
+| [0014](0014-profile-schema-gains-proxy-pac-url.md) | Profile schema gains one optional field, `proxy.pac_url` | Accepted |
+| [0015](0015-os-native-proxy-settings-are-a-v1-non-goal.md) | Reading OS-native/platform proxy settings is a v1 non-goal | Accepted |
+| [0016](0016-wpad-discovery-is-dns-based-only-not-dhcp-option-252.md) | WPAD discovery is DNS-based only, not DHCP option 252 | Accepted |
+| [0017](0017-pac-evaluation-runs-on-a-terminable-worker-thread.md) | PAC evaluation runs on a terminable Worker thread | Accepted |
+| [0018](0018-pac-confinement-is-a-fresh-realm-not-a-hardened-host-object.md) | PAC confinement is a fresh realm, not a hardened host object | Accepted |
+| [0019](0019-pac-worker-self-exits-before-its-own-pending-microtasks-run.md) | The PAC worker self-exits before its own pending microtasks run | Accepted |
+| [0020](0020-context-budget-guard-covers-multi-work-package-fix-rounds.md) | Context-budget guard's example set now covers multi-work-package fix rounds | Accepted |

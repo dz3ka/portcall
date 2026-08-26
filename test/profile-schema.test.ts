@@ -50,3 +50,26 @@ describe('profileSchema doh_resolvers', () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe('profileSchema proxy.pac_url', () => {
+  it('accepts a valid PAC URL', () => {
+    const result = profileSchema.safeParse(raw({ proxy: { pac_url: 'http://wpad.example.com/proxy.pac' } }));
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.proxy?.pac_url).toBe('http://wpad.example.com/proxy.pac');
+    }
+  });
+
+  it('rejects an invalid PAC URL', () => {
+    const result = profileSchema.safeParse(raw({ proxy: { pac_url: 'not-a-url' } }));
+    expect(result.success).toBe(false);
+  });
+
+  it('is still valid when the proxy field is omitted entirely', () => {
+    const result = profileSchema.safeParse(raw());
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.proxy).toBeUndefined();
+    }
+  });
+});

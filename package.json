@@ -14,7 +14,7 @@
   },
   "type": "module",
   "engines": {
-    "node": ">=22.6.0"
+    "node": ">=22.18.0"
   },
   "bin": {
     "portcall": "dist/cli/index.js"
