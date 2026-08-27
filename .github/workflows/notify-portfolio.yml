@@ -1,0 +1,87 @@
+name: Notify portfolio
+
+# Tells dz3ka/portfolio where this build has got to, so the bench on the site
+# stops depending on someone remembering to update it. Fires only after a push
+# to main, and only for pushes that changed something the site reports on.
+#
+# What is sent is deliberately small: which milestone, whether it closed, and two
+# counts. The portfolio derives the label and the progress bar from those, so
+# every project is on the same scale and no repo can invent its own.
+#
+# The milestone itself is declared in .portfolio-status.json rather than parsed
+# out of the README, because "has M3 closed" is a judgement, not a fact CI can
+# read. Bumping that file is the one manual step per milestone, and it belongs
+# in the same commit that closes the milestone.
+on:
+  push:
+    # This repo's trunk is master, not main. The portfolio's is main; the two are
+    # unrelated and neither follows from the other.
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Count what the site shows
+        id: counts
+        run: |
+          set -euo pipefail
+          # ADRs: numbered decision records, index excluded.
+          adrs=$(find docs/adr -name '[0-9]*.md' -type f | wc -l | tr -d ' ')
+          # Tests: every it()/test() across the vitest suites. The same expression
+          # the portfolio's stat tile has always quoted, run here where it cannot
+          # drift from the tree it is counting.
+          tests=$(grep -rhoE "\b(it|test)\(" test src --include='*.test.ts' | wc -l | tr -d ' ')
+          echo "adrs=$adrs"   >> "$GITHUB_OUTPUT"
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "Counted $adrs ADRs, $tests tests"
+
+      - name: Read the declared milestone
+        id: milestone
+        run: |
+          set -euo pipefail
+          test -f .portfolio-status.json || {
+            echo "::error::.portfolio-status.json is missing — the portfolio cannot place this build without it"
+            exit 1
+          }
+          jq -r '"milestone=\(.milestone)", "milestonesTotal=\(.milestonesTotal)", "complete=\(.complete)"' \
+            .portfolio-status.json >> "$GITHUB_OUTPUT"
+          cat .portfolio-status.json
+
+      - name: Dispatch to the portfolio
+        env:
+          # Fine-grained PAT, contents:write on dz3ka/portfolio only. It can write
+          # that repo and nothing else; it is never echoed, and the payload it
+          # carries is re-validated on the other side before anything is written.
+          GH_TOKEN: ${{ secrets.PORTFOLIO_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::PORTFOLIO_SYNC_TOKEN is not set — skipping the portfolio sync"
+            exit 0
+          fi
+          gh api repos/dz3ka/portfolio/dispatches \
+            --method POST \
+            --input - <<JSON
+          {
+            "event_type": "wip-status",
+            "client_payload": {
+              "project": "portcall",
+              "milestone": ${{ steps.milestone.outputs.milestone }},
+              "milestonesTotal": ${{ steps.milestone.outputs.milestonesTotal }},
+              "complete": ${{ steps.milestone.outputs.complete }},
+              "stats": {
+                "adrs": ${{ steps.counts.outputs.adrs }},
+                "tests": ${{ steps.counts.outputs.tests }}
+              },
+              "commit": "${{ github.sha }}"
+            }
+          }
+          JSON
+          echo "Reported M${{ steps.milestone.outputs.milestone }} to the portfolio"
