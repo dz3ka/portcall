@@ -1,9 +1,10 @@
 import { SubjectAlternativeNameExtension, X509Certificate } from '@peculiar/x509';
 import type { Evidence, Finding } from '../../model/finding.ts';
 import type { Profile } from '../../profiles/schema.ts';
+import type { CertificateIndex } from '../shared/root-index.ts';
 import { cap } from '../shared/severity.ts';
 import { classifyRoot } from './public-roots.ts';
-import type { PublicRootIndex, RootVerdict } from './public-roots.ts';
+import type { RootVerdict } from './public-roots.ts';
 
 /**
  * TLS chain evaluation (M3, SPEC.md 7, ADR-0002).
@@ -16,10 +17,10 @@ import type { PublicRootIndex, RootVerdict } from './public-roots.ts';
  * `@peculiar/x509` is used strictly to parse and to read fields (ADR-0021).
  * `X509ChainBuilder`, `cert.verify()` and every other trust-shaped API are out
  * of bounds, and `test/guardrails/x509-parse-only.test.ts` enforces that rather
- * than trusting this comment. The consequence is deliberate: root membership is
- * decided in exactly one place, `public-roots.ts`, over the runtime's own
- * bundle, and the answers this file gives are only ever as strong as the bytes
- * support.
+ * than trusting this comment. The consequence is deliberate: root membership
+ * has exactly one implementation - the index in `../shared/root-index.ts`, read
+ * through `public-roots.ts` over the runtime's own bundle - and the answers this
+ * file gives are only ever as strong as the bytes support.
  *
  * The findings are split by *ticket*, not by layer (CLAUDE.md): a private root
  * goes to whoever runs the interception appliance, an expired certificate to
@@ -74,7 +75,7 @@ export interface ChainTarget {
  */
 export interface ChainEvaluationOptions {
   /** The runtime's public root bundle, indexed. Passed in so this module imports no `node:*`. */
-  roots: PublicRootIndex;
+  roots: CertificateIndex;
   /** Evaluation time. Injected so expiry is a function of its inputs and not of the day the suite runs. */
   now: Date;
 }
@@ -224,7 +225,7 @@ function chainUnparseable(target: ChainTarget, capture: CapturedChain, length: n
   };
 }
 
-function publicRoot(target: ChainTarget, capture: CapturedChain, root: X509Certificate, roots: PublicRootIndex): Finding {
+function publicRoot(target: ChainTarget, capture: CapturedChain, root: X509Certificate, roots: CertificateIndex): Finding {
   return {
     id: 'tls.public-root',
     probe: 'tls',

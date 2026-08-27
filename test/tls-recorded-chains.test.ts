@@ -7,7 +7,7 @@ import { PUBLIC_ROOT_CA_PEMS } from '../src/net/root-bundle.ts';
 import type { TlsCapture, TlsCaptureTarget, TlsChainOutcome } from '../src/net/types.ts';
 import type { LoadedProfile, Profile } from '../src/profiles/schema.ts';
 import { runTls } from '../src/probes/tls/index.ts';
-import { publicRootIndex } from '../src/probes/tls/public-roots.ts';
+import { certificateIndex } from '../src/probes/shared/root-index.ts';
 import { RECORDED_CONDITIONS, loadRecordedChain, recordedChainPath } from './fixtures/tls/recorded-chains.ts';
 import type { RecordedCapture, RecordedChain, RecordedCondition } from './fixtures/tls/recorded-chains.ts';
 
@@ -138,7 +138,7 @@ describe('recorded chain fixtures', () => {
    * says how to re-record.
    */
   it('is still anchored in a root this runtime ships', () => {
-    const roots = publicRootIndex(PUBLIC_ROOT_CA_PEMS);
+    const roots = certificateIndex(PUBLIC_ROOT_CA_PEMS);
     const anchored = RECORDED_CONDITIONS.map(loadRecordedChain).filter((fixture) => fixture.publicAnchor !== null);
 
     expect(anchored.length).toBeGreaterThan(0);

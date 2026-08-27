@@ -1,17 +1,21 @@
-import { X509Certificate } from '@peculiar/x509';
-import type { Name } from '@peculiar/x509';
+import type { X509Certificate } from '@peculiar/x509';
+import { canonicalDn } from '../shared/root-index.ts';
+import type { CertificateIndex } from '../shared/root-index.ts';
 
 /**
  * Public-root classification (M3, ADR-0002, ADR-0021).
  *
  * The question is only ever "is the anchor of this chain one of the public
  * roots the runtime ships, or something someone installed here". The reference
- * list arrives as PEM strings - `PUBLIC_ROOT_CA_PEMS` in `src/net/root-bundle.ts`,
- * which is the runtime's own bundle - and is passed *in*, never imported here:
- * that file touches `node:tls`, and this one must stay importable by a pure
- * evaluation. Taking the bundle as a parameter also means a test can pin the
- * reference list, and the real one is then just the list the shell happens to
- * pass (`test/tls-public-roots.test.ts` passes the real one on purpose).
+ * list arrives already indexed, as a `CertificateIndex` over
+ * `PUBLIC_ROOT_CA_PEMS` in `src/net/root-bundle.ts` - the runtime's own bundle -
+ * and is passed *in*, never imported here: that file touches `node:tls`, and
+ * this one must stay importable by a pure evaluation. Taking the bundle as a
+ * parameter also means a test can pin the reference list, and the real one is
+ * then just the list the shell happens to pass
+ * (`test/tls-public-roots.test.ts` passes the real one on purpose). The index
+ * itself lives in `src/probes/shared/root-index.ts`, because the `truststore`
+ * probe indexes the OS store with the same code.
  *
  * **Nothing here verifies a signature**, per ADR-0021: `@peculiar/x509` is used
  * to parse and to read names, and its chain-building and verification APIs are
@@ -50,74 +54,6 @@ export interface RootVerdict {
   matchedIndex: number | null;
   /** Indices on the leaf's issuer->subject path, leaf first. Never empty. */
   path: readonly number[];
-}
-
-/**
- * Membership questions over the runtime's root bundle. Two of them, because
- * they are worth different amounts: `hasCertificate` is proof, `hasSubject`
- * only rules things out (see the module comment).
- */
-export interface PublicRootIndex {
-  /** How many roots were indexed. Reported so a reader can see the bundle was not empty. */
-  readonly size: number;
-  hasCertificate(der: Uint8Array): boolean;
-  hasSubject(canonicalSubject: string): boolean;
-}
-
-/** Base64 of the DER bytes, used as the identity key. `btoa` is a platform global, not `node:*`. */
-function derKey(der: Uint8Array): string {
-  let binary = '';
-  // Chunked: a certificate is a few kilobytes and `String.fromCharCode(...der)`
-  // spreads every byte as an argument, which is a stack overflow waiting for a
-  // large chain to arrive.
-  for (let offset = 0; offset < der.length; offset += 0x2000) {
-    binary += String.fromCharCode(...der.subarray(offset, offset + 0x2000));
-  }
-  return btoa(binary);
-}
-
-/** Trim, collapse runs of whitespace, lowercase: the parts of DN matching that are not encoding. */
-function normaliseAttribute(value: string): string {
-  return value.trim().replace(/\s+/g, ' ').toLowerCase();
-}
-
-/**
- * A DN reduced to a comparable string.
- *
- * Two encoders will spell the same distinguished name differently - printable
- * string versus UTF-8, `CN=Foo` versus `cn = Foo` - so the comparison runs over
- * the structured form (`Name.toJSON()`), never over `cert.subject`. RDN *order*
- * is kept because it is semantically significant; the attributes inside one
- * multi-valued RDN are sorted, because their order is not.
- */
-export function canonicalDn(name: Name): string {
-  return name
-    .toJSON()
-    .map((rdn) =>
-      Object.entries(rdn)
-        .map(([type, values]) => `${type.toLowerCase()}=${values.map(normaliseAttribute).sort().join('*')}`)
-        .sort()
-        .join('+'),
-    )
-    .join(',');
-}
-
-/** Index a bundle of PEM roots. Parsing ~150 certificates costs tens of milliseconds; do it once per run. */
-export function publicRootIndex(pems: readonly string[]): PublicRootIndex {
-  const certificates = new Set<string>();
-  const subjects = new Set<string>();
-
-  for (const pem of pems) {
-    const root = new X509Certificate(pem);
-    certificates.add(derKey(new Uint8Array(root.rawData)));
-    subjects.add(canonicalDn(root.subjectName));
-  }
-
-  return {
-    size: pems.length,
-    hasCertificate: (der: Uint8Array): boolean => certificates.has(derKey(der)),
-    hasSubject: (canonicalSubject: string): boolean => subjects.has(canonicalSubject),
-  };
 }
 
 /**
@@ -176,7 +112,7 @@ function issuancePath(chain: readonly X509Certificate[]): number[] {
  * that root still reads `public`. Names and bytes cannot tell that from a
  * genuine chain.
  */
-export function classifyRoot(chain: readonly X509Certificate[], roots: PublicRootIndex): RootVerdict {
+export function classifyRoot(chain: readonly X509Certificate[], roots: CertificateIndex): RootVerdict {
   const path = issuancePath(chain);
 
   const onPath = new Set(path);

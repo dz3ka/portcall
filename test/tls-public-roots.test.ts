@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { X509Certificate } from '@peculiar/x509';
 import { PUBLIC_ROOT_CA_PEMS } from '../src/net/root-bundle.ts';
-import { canonicalDn, classifyRoot, publicRootIndex } from '../src/probes/tls/public-roots.ts';
+import { canonicalDn, certificateIndex } from '../src/probes/shared/root-index.ts';
+import { classifyRoot } from '../src/probes/tls/public-roots.ts';
 import type { RootClass, RootReason, RootVerdict } from '../src/probes/tls/public-roots.ts';
 import { derOfPem, subjectOfPem, syntheticChain } from './helpers/synthetic-chain.ts';
 
@@ -17,7 +18,7 @@ import { derOfPem, subjectOfPem, syntheticChain } from './helpers/synthetic-chai
  * runtime by itself.
  *
  * What generalises is measured next door. `test/net-root-bundle.test.ts` runs
- * the same `publicRootIndex`/`classifyRoot` under Node and under Bun over a
+ * the same `certificateIndex`/`classifyRoot` under Node and under Bun over a
  * *fixed* reference root set built from the committed fixtures, and requires
  * identical verdicts - so the code is proven runtime-agnostic with the bundle
  * held still. It separately requires that the roots those fixtures anchor in
@@ -25,7 +26,7 @@ import { derOfPem, subjectOfPem, syntheticChain } from './helpers/synthetic-chai
  * could flip a verdict for a customer.
  */
 
-const ROOTS = publicRootIndex(PUBLIC_ROOT_CA_PEMS);
+const ROOTS = certificateIndex(PUBLIC_ROOT_CA_PEMS);
 
 /** Three roots from across the bundle, so the test is not an accident of ordering. */
 function samplePems(): string[] {

@@ -1,6 +1,7 @@
 import { X509Certificate } from '@peculiar/x509';
 import { PUBLIC_ROOT_CA_PEMS } from '../../../src/net/root-bundle.ts';
-import { classifyRoot, publicRootIndex } from '../../../src/probes/tls/public-roots.ts';
+import { certificateIndex } from '../../../src/probes/shared/root-index.ts';
+import { classifyRoot } from '../../../src/probes/tls/public-roots.ts';
 import type { RootClass, RootReason } from '../../../src/probes/tls/public-roots.ts';
 import { RECORDED_CONDITIONS, loadRecordedChain } from './recorded-chains.ts';
 import type { RecordedCondition } from './recorded-chains.ts';
@@ -20,7 +21,7 @@ import type { RecordedCondition } from './recorded-chains.ts';
  * `test/net-root-bundle.test.ts` import this module - the test itself runs it
  * under Node, `print-root-verdicts.ts` runs it under Bun - so one
  * implementation of portcall's own root evaluation is measured twice. That is
- * the point of the exercise: without it, not one line of `publicRootIndex` or
+ * the point of the exercise: without it, not one line of `certificateIndex` or
  * `classifyRoot` ever executes under the runtime that builds the binary
  * customers run.
  *
@@ -85,7 +86,7 @@ export interface CrossRuntimeVerdict {
  * issuance walk.
  */
 export function fixtureVerdicts(): CrossRuntimeVerdict[] {
-  const roots = publicRootIndex(FIXTURE_ROOT_PEMS);
+  const roots = certificateIndex(FIXTURE_ROOT_PEMS);
   const verdicts: CrossRuntimeVerdict[] = [];
 
   for (const condition of RECORDED_CONDITIONS) {
@@ -126,7 +127,7 @@ export function fixtureVerdicts(): CrossRuntimeVerdict[] {
  * over their own `tls.rootCertificates`, and both answers must be `true`.
  */
 export function fixtureAnchorsInRuntimeBundle(): Record<string, boolean> {
-  const runtime = publicRootIndex(PUBLIC_ROOT_CA_PEMS);
+  const runtime = certificateIndex(PUBLIC_ROOT_CA_PEMS);
   const present: Record<string, boolean> = {};
 
   for (const pem of FIXTURE_ROOT_PEMS) {

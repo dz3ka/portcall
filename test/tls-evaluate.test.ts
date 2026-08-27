@@ -5,7 +5,7 @@ import type { Profile } from '../src/profiles/schema.ts';
 import { PUBLIC_ROOT_CA_PEMS } from '../src/net/root-bundle.ts';
 import { EXPIRY_WARNING_DAYS, compareChains, evaluateChain } from '../src/probes/tls/evaluate.ts';
 import type { CapturedChain, ChainEvaluationOptions } from '../src/probes/tls/evaluate.ts';
-import { publicRootIndex } from '../src/probes/tls/public-roots.ts';
+import { certificateIndex } from '../src/probes/shared/root-index.ts';
 import { derOfPem, subjectOfPem, syntheticChain } from './helpers/synthetic-chain.ts';
 
 /**
@@ -21,7 +21,7 @@ function daysFromNow(days: number): Date {
   return new Date(NOW.getTime() + days * DAY_MS);
 }
 
-const OPTIONS: ChainEvaluationOptions = { roots: publicRootIndex(PUBLIC_ROOT_CA_PEMS), now: NOW };
+const OPTIONS: ChainEvaluationOptions = { roots: certificateIndex(PUBLIC_ROOT_CA_PEMS), now: NOW };
 const TARGET = { host: 'api.example.com', required: true };
 const STRICT: Pick<Profile, 'tls'> = { tls: { min_version: '1.2', interception_tolerated: false } };
 const TOLERANT: Pick<Profile, 'tls'> = { tls: { min_version: '1.2', interception_tolerated: true } };

@@ -4,10 +4,10 @@ import { PUBLIC_ROOT_CA_PEMS } from '../../net/root-bundle.ts';
 import { tlsCapturer } from '../../net/tls-capture.ts';
 import type { TlsCapture, TlsCapturePhase, TlsCaptureTarget, TlsChainOutcome } from '../../net/types.ts';
 import type { Endpoint } from '../../profiles/schema.ts';
+import { certificateIndex } from '../shared/root-index.ts';
 import { compareChains, evaluateChain } from './evaluate.ts';
 import type { CapturedChain, ChainEvaluationOptions } from './evaluate.ts';
 import { discoverEnvProxy } from './proxy-env.ts';
-import { publicRootIndex } from './public-roots.ts';
 
 /**
  * The `tls` probe (M3, SPEC.md §7): what certificate chain does this machine
@@ -83,7 +83,7 @@ export async function runTls(
   // Indexed once per run as well. The bundle is a few hundred certificates and
   // indexing it parses every one of them; doing that per endpoint would make a
   // ten-endpoint profile pay for it ten times.
-  const options: ChainEvaluationOptions = { roots: publicRootIndex(PUBLIC_ROOT_CA_PEMS), now };
+  const options: ChainEvaluationOptions = { roots: certificateIndex(PUBLIC_ROOT_CA_PEMS), now };
 
   // Endpoints concurrently, for the reason the egress probe gives: a profile
   // behind a silent firewall would otherwise spend the whole run's budget

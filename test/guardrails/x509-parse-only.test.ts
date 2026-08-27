@@ -1,14 +1,24 @@
 import { describe, expect, it } from 'vitest';
+import { existsSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 
 const SRC_ROOT = join(import.meta.dirname, '..', '..', 'src');
-const TLS_PROBE_DIR = join(SRC_ROOT, 'probes', 'tls');
+/**
+ * The directories that must stay pure. `probes/shared/` joined the list when the
+ * certificate index moved there: the parse/trust boundary follows the code, or
+ * the move is a hole in this guardrail. `probes/truststore/` is listed ahead of
+ * the probe that will live there, so the ban is in place before its first line
+ * is written rather than after.
+ */
+const PURE_PROBE_DIRS: readonly string[] = ['probes/tls', 'probes/shared', 'probes/truststore'];
 
 /**
  * ADR-0021: `@peculiar/x509` is in this repo to **parse DER and read fields**,
- * and for nothing else. Root membership is decided in exactly one place -
- * `src/probes/tls/public-roots.ts`, over the runtime's own bundle - and if the
+ * and for nothing else. Root membership has exactly one implementation -
+ * `src/probes/shared/root-index.ts` answers it by bytes and by subject DN, and
+ * `src/probes/tls/public-roots.ts` turns the answer into a verdict over the
+ * runtime's own bundle - and if the
  * evaluation ever reached for the library's chain-building or signature APIs
  * there would be two paths to the most alarming finding portcall emits, one
  * fixture-tested and one inside a dependency, free to disagree without anything
@@ -43,11 +53,11 @@ const FORBIDDEN_TRUST_APIS: readonly Forbidden[] = [
 ];
 
 /**
- * The `tls` probe must also stay `node:*`-free: it is the pure half of the
- * split ADR-0002 describes, and the moment it imports a runtime module its
- * verdicts stop being reproducible from bytes alone. The networking guardrail
- * already bans `node:net`/`node:tls`/`node:dns` outside `src/net/`; this widens
- * it to *every* `node:` module for this directory.
+ * Every pure probe directory must also stay `node:*`-free: they are the pure
+ * half of the split ADR-0002 describes, and the moment one imports a runtime
+ * module its verdicts stop being reproducible from bytes alone. The networking
+ * guardrail already bans `node:net`/`node:tls`/`node:dns` outside `src/net/`;
+ * this widens it to *every* `node:` module for those directories.
  */
 const NODE_IMPORT = /from\s+['"]node:[a-z/]+['"]|require\(\s*['"]node:[a-z/]+['"]\s*\)/;
 
@@ -77,19 +87,33 @@ async function* walk(dir: string): AsyncGenerator<string> {
   }
 }
 
-async function tlsProbeSources(): Promise<{ rel: string; text: string }[]> {
+/**
+ * Every source under `PURE_PROBE_DIRS`. A directory that does not exist yet is
+ * empty rather than an error, so the ban can be written down before the probe it
+ * covers; the vacuousness check below is what stops a directory that has been
+ * renamed away from being silently unscanned.
+ */
+async function pureProbeSources(): Promise<{ rel: string; text: string }[]> {
   const files: { rel: string; text: string }[] = [];
-  for await (const file of walk(TLS_PROBE_DIR)) {
-    files.push({ rel: relative(SRC_ROOT, file).replace(/\\/g, '/'), text: await readFile(file, 'utf8') });
+  for (const dir of PURE_PROBE_DIRS) {
+    const root = join(SRC_ROOT, ...dir.split('/'));
+    if (!existsSync(root)) continue;
+    for await (const file of walk(root)) {
+      files.push({ rel: relative(SRC_ROOT, file).replace(/\\/g, '/'), text: await readFile(file, 'utf8') });
+    }
   }
   return files;
 }
 
 describe('x509 parse-only guardrail', () => {
-  it('scans a tls probe that actually exists, so the checks below are not vacuous', async () => {
-    const files = await tlsProbeSources();
-    expect(files.map((file) => file.rel).sort()).toContain('probes/tls/evaluate.ts');
-    expect(files.map((file) => file.rel).sort()).toContain('probes/tls/public-roots.ts');
+  it('scans a real file from every pure directory present, so the checks below are not vacuous', async () => {
+    const scanned = (await pureProbeSources()).map((file) => file.rel).sort();
+    expect(scanned).toContain('probes/tls/evaluate.ts');
+    // `public-roots.ts` outlived the index's move: it still decides the verdict.
+    expect(scanned).toContain('probes/tls/public-roots.ts');
+    // The moved index. Named because `probes/shared/` is skipped when absent,
+    // and a skipped directory makes the node: ban below vacuous for it.
+    expect(scanned).toContain('probes/shared/root-index.ts');
   });
 
   it('no module in src/ calls an x509 trust or verification API', async () => {
@@ -101,8 +125,8 @@ describe('x509 parse-only guardrail', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('the tls probe imports no node: module, so its verdicts are reproducible from bytes', async () => {
-    const offenders = (await tlsProbeSources()).flatMap((file) => scanForNodeImport(file.rel, file.text));
+  it('no pure probe module imports a node: module, so its verdicts are reproducible from bytes', async () => {
+    const offenders = (await pureProbeSources()).flatMap((file) => scanForNodeImport(file.rel, file.text));
     expect(offenders).toEqual([]);
   });
 

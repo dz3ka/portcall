@@ -24,7 +24,7 @@ import type { TlsCapture, TlsCapturePhase, TlsChainOutcome } from '../../src/net
 import { compareChains, evaluateChain } from '../../src/probes/tls/evaluate.ts';
 import type { CapturedChain } from '../../src/probes/tls/evaluate.ts';
 import { runTls } from '../../src/probes/tls/index.ts';
-import { publicRootIndex } from '../../src/probes/tls/public-roots.ts';
+import { certificateIndex } from '../../src/probes/shared/root-index.ts';
 import type { RootReason } from '../../src/probes/tls/public-roots.ts';
 import { derOfPem, subjectOfPem, syntheticChain } from '../helpers/synthetic-chain.ts';
 
@@ -299,7 +299,7 @@ const HOSTILE_ERRORS: readonly unknown[] = [
  * peer made up.
  */
 async function tlsFindings(): Promise<Finding[]> {
-  const roots = publicRootIndex(PUBLIC_ROOT_CA_PEMS);
+  const roots = certificateIndex(PUBLIC_ROOT_CA_PEMS);
   const now = new Date('2026-08-26T00:00:00Z');
   const publicRootPem = PUBLIC_ROOT_CA_PEMS[0] ?? '';
 
