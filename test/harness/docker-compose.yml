@@ -41,7 +41,12 @@ services:
     healthcheck:
       # Resolves the planted name, not just "is the process up": dnsmasq answers
       # on the socket well before a bad config would have been noticed otherwise.
-      test: ['CMD', 'nslookup', 'api.anthropic.com', '127.0.0.1']
+      # `-type=a` is load-bearing - do not "simplify" it away. BusyBox `nslookup`
+      # with no type asks A *and* AAAA, and this zone is planted IPv4-only by
+      # design (dns/dnsmasq.conf), so the AAAA half is answered REFUSED and
+      # BusyBox exits 1 having just printed the correct A answer. Without the
+      # flag this service is unhealthy forever and `up --wait` aborts the network.
+      test: ['CMD', 'nslookup', '-type=a', 'api.anthropic.com', '127.0.0.1']
       interval: 2s
       timeout: 3s
       retries: 15
