@@ -10,10 +10,19 @@ import { derOfPem, subjectOfPem, syntheticChain } from './helpers/synthetic-chai
  *
  * The verdict this file covers is the most alarming one portcall emits, so the
  * tests run against the *real* bundle - `PUBLIC_ROOT_CA_PEMS`, the runtime's
- * own Mozilla list - and not a stand-in. That is what makes
- * `test/net-root-bundle.test.ts`'s Node/Bun parity check load-bearing: the two
- * files are about the same snapshot, so parity there is parity of the verdict
- * here.
+ * own Mozilla list - and not a stand-in. That keeps the classification honest
+ * about the list it will actually be given at runtime, but it is a statement
+ * about *this* process's bundle only: Node and Bun ship different Mozilla
+ * snapshots and always have (ADR-0031), so nothing here generalises to another
+ * runtime by itself.
+ *
+ * What generalises is measured next door. `test/net-root-bundle.test.ts` runs
+ * the same `publicRootIndex`/`classifyRoot` under Node and under Bun over a
+ * *fixed* reference root set built from the committed fixtures, and requires
+ * identical verdicts - so the code is proven runtime-agnostic with the bundle
+ * held still. It separately requires that the roots those fixtures anchor in
+ * ship in both runtimes' own bundles, which is the one bundle difference that
+ * could flip a verdict for a customer.
  */
 
 const ROOTS = publicRootIndex(PUBLIC_ROOT_CA_PEMS);

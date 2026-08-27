@@ -74,3 +74,5 @@ Numbering is sequential at creation (`NNNN-kebab-title.md`). Status is one of:
 | [0027](0027-a-timed-out-capture-is-its-own-finding-not-a-coded-failure-with-no-code.md) | A capture that timed out is its own finding, not a coded failure with no code | Accepted |
 | [0028](0028-the-tls-probe-is-silent-on-ports-other-than-443.md) | The `tls` probe's silence on other ports is deliberate | Accepted |
 | [0029](0029-interception-severity-is-decided-once-in-the-trust-verdict.md) | Interception severity is decided once, in the trust verdict | Accepted |
+| [0030](0030-the-harness-zone-is-ipv4-only-and-aaaa-is-unanswered.md) | The harness zone is IPv4-only, and AAAA is left unanswered | Accepted |
+| [0031](0031-cross-runtime-parity-is-a-verdict-claim-not-a-bundle-claim.md) | Cross-runtime parity is a verdict claim, not a bundle claim | Accepted |

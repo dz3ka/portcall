@@ -8,6 +8,11 @@ This is a deliverable, not a test utility. Everything else in this repo judges a
 certificate chain that somebody recorded; this judges a chain that a real proxy
 is really re-signing, one hop away, right now.
 
+It runs: six tests across the four conditions below pass on a local Docker
+daemon, both against an already-warm network and from a cold `down -v` start
+that makes `mitmproxy` generate its root again. It has not yet been observed
+green on a hosted CI runner, which is what the Linux-only `harness` job is for.
+
 ## Running it
 
 ```sh
@@ -19,6 +24,12 @@ docker compose -f test/harness/docker-compose.yml down -v
 `--wait` is the readiness mechanism. Every service has a healthcheck that proves
 its *hostile condition*, not merely that its process started, so there is no
 `sleep` anywhere in the harness, the suite, or CI.
+
+The `dns` healthcheck asks for an A record by name — `nslookup -type=a` — because
+this zone is IPv4-only and AAAA is deliberately left unanswered (ADR-0030).
+BusyBox's untyped `nslookup` asks A *and* AAAA and exits non-zero if either leg
+fails, so it reported the resolver unhealthy while the A answer it needed was
+already correct, and `up --wait` aborted on a network that worked.
 
 The suite is never part of `npm test` or `npm run verify` — portcall's whole
 premise is that it runs on a locked-down machine where nothing is installed, and

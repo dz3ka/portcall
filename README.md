@@ -94,7 +94,14 @@ proxy when `HTTPS_PROXY`/`HTTP_PROXY` names one. What it reports:
   private root is a blocker unless the profile sets
   `tls.interception_tolerated` or marks the endpoint optional, in which case it
   degrades: the network is terminating TLS itself, and every runtime still has
-  to be told to trust the appliance CA before the tool works.
+  to be told to trust the appliance CA before the tool works. Portcall ships no
+  root list of its own — it reads the one its runtime was built with, and those
+  snapshots differ between builds (Node 22 ships 145 roots, bun 121, Node 24
+  120). What is held constant is the *answer*: the classification code is
+  tested under both runtimes over the same fixed roots and must reach identical
+  verdicts, and the roots the test fixtures anchor in must be present in both
+  bundles
+  ([ADR-0031](docs/adr/0031-cross-runtime-parity-is-a-verdict-claim-not-a-bundle-claim.md)).
 - **the direct chain against the proxied one** — `tls.intercepted-via-proxy`
   (degraded) when the two differ, `tls.chain-consistent` when they do not. This
   is the one interception claim that rests on no trust judgement at all: two
@@ -278,12 +285,14 @@ machines. Requires Docker with `compose` v2. CI runs it as its own Linux-only
 job: the hosted Windows and macOS runners have no Linux Docker daemon, and
 nothing about a proxy re-signing TLS is host-OS dependent.
 
-The harness is built but has not yet been executed. No machine this project has
-been developed on had Docker installed, so its first run will be the CI
-`harness` job, and until that job is green the ids and severities it asserts
-against a live `mitmproxy` and `squid` are unproven. It is a written deliverable
-with the network still ahead of it, and saying otherwise here would be the kind
-of overstatement the rest of this file avoids.
+The harness has been run. Its six tests — covering all four planted conditions
+— pass on a development machine's Docker daemon, both against a warm network
+and from a cold `down -v` start that regenerates `mitmproxy`'s root, so the ids
+and severities it asserts against a live `mitmproxy`, `squid`, `dnsmasq` and
+`nginx` are observed rather than only written down. What is not yet proven is
+the same run on a hosted runner: the CI `harness` job executes the same compose
+file on every push, and until it has been green there, "it works on Linux
+containers" is a local result and this file will not claim more than that.
 
 [test/harness/README.md](test/harness/README.md) has the per-service table of
 which condition each one plants and which finding it provokes, the fixed

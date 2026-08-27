@@ -27,7 +27,7 @@ jobs:
           # test suite and the PAC worker load .ts files directly, so a literal 22.6
           # would fail to boot the tool at all.
           cache: npm
-      # bun is installed here even though `verify` builds no binaries. ADR-0002
+      # bun is installed here even though `verify` builds no binaries. ADR-0031
       # stakes the project on one claim - the same chain gets the same verdict
       # under Node and under the bun-compiled binary - and
       # test/net-root-bundle.test.ts measures it by running the same module
