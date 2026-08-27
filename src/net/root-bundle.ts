@@ -19,10 +19,15 @@ import { rootCertificates } from 'node:tls';
  *    this repo would drift, and a stale one would call a genuinely public root
  *    "private" - the single most alarming finding this tool can emit. Shipping
  *    no copy means there is nothing to go stale.
- * 3. **Cross-runtime parity is asserted, not assumed.** If Bun's bundled list
- *    ever diverges from Node's, the same proxy would be classified differently
- *    depending on which binary the customer ran. `test/net-root-bundle.test.ts`
- *    runs the fingerprint set under both runtimes and compares them.
+ * 3. **Cross-runtime parity is asserted over the verdict, not the bundle**
+ *    (ADR-0031). Node and Bun ship *different* Mozilla snapshots and always
+ *    have - 145 roots, 121, 120 across three runtime builds - and no ADR ever
+ *    promised otherwise. What must not diverge is the answer: the same chain
+ *    classified the same way whichever binary the customer ran. So
+ *    `test/net-root-bundle.test.ts` runs portcall's own root evaluation under
+ *    both runtimes over committed fixture chains and a fixed reference root
+ *    set, and separately asserts that the roots those fixtures anchor in ship
+ *    in both bundles - the one difference that would flip a verdict.
  *
  * This module reads no store on disk and no OS trust store: locating and
  * reading *those* is the `truststore` probe's job (M4, SPEC.md 7), and it is a

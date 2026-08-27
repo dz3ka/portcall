@@ -10,7 +10,7 @@ import type { RecordedCondition } from './recorded-chains.ts';
  *     node test/fixtures/tls/record-chains.ts
  *
  * A separate file from `recorded-chains.ts` for the reason
- * `print-root-fingerprints.ts` is separate from `root-fingerprints.ts`: that
+ * `print-root-verdicts.ts` is separate from `root-verdicts.ts`: that
  * module is imported by the tests, and a module that writes files on import
  * would rewrite the fixtures every time the suite ran - which is the one thing
  * a committed fixture must not do.

@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 
 /**
- * Shared by `test/net-root-bundle.test.ts` and its Bun-side sibling
- * (`print-root-fingerprints.ts`) so that both runtimes are measured by the
- * *same* code. A parity test whose two halves each carry their own hashing
- * logic proves nothing about the bundles it claims to compare.
+ * Used by `test/net-root-bundle.test.ts` to answer one question about the
+ * runtime's own bundle: that it lists no root twice. The cross-runtime claim
+ * moved off fingerprints and onto verdicts in ADR-0031, so this is no longer
+ * the code a second runtime runs - `root-verdicts.ts` is.
  *
  * Only `node:crypto`'s SHA-256 and base64 decoding are used - both are
  * behaviour Bun implements identically, and neither is what is under test.
