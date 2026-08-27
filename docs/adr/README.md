@@ -15,9 +15,10 @@ Numbering is sequential at creation (`NNNN-kebab-title.md`). Status is one of:
 > Decisions after 0006 take their numbers at the milestone whose code forces
 > them, not before.
 
-> Note: ADR-0002 records a decision whose dependency does not land until M3.
-> It is written now because it constrains the finding model and the fixture
-> format that M0 ships; it describes an intended shape, not code in the tree.
+> Note: ADR-0002 was written in M0, ahead of the code it governs, because it
+> constrains the finding model and the fixture format that M0 ships. Its
+> dependency landed in M3: `src/probes/tls/evaluate.ts` and
+> `src/probes/tls/public-roots.ts` are that decision in the tree.
 
 ## Template
 

@@ -38,6 +38,16 @@ function bunVersion(): string | null {
 }
 
 const BUN = bunVersion();
+if (BUN === null && process.env.CI !== undefined) {
+  // Skip-when-absent is right for a bare laptop (ADR-0001), but CI installs bun
+  // deliberately, so absence there means the install broke - and a broken install
+  // must not buy a green run by silently skipping. ADR-0025: no permanent green lie.
+  throw new Error(
+    '[net-root-bundle] bun is not on PATH but CI is set: the ci `verify` job installs bun, so ' +
+      'this means the install step failed. Failing loudly rather than skipping the Node/Bun ' +
+      'parity check (ADR-0031) and reporting green.',
+  );
+}
 if (BUN === null) {
   console.info(
     '[net-root-bundle] bun is not on PATH here: the Node/Bun root-bundle parity check (ADR-0031) ' +

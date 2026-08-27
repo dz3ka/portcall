@@ -10,8 +10,8 @@ is really re-signing, one hop away, right now.
 
 It runs: six tests across the four conditions below pass on a local Docker
 daemon, both against an already-warm network and from a cold `down -v` start
-that makes `mitmproxy` generate its root again. It has not yet been observed
-green on a hosted CI runner, which is what the Linux-only `harness` job is for.
+that makes `mitmproxy` generate its root again. It has also been observed green
+on a hosted CI runner: the Linux-only `harness` job passed on `c06c8c4`.
 
 ## Running it
 

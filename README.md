@@ -289,10 +289,11 @@ The harness has been run. Its six tests — covering all four planted conditions
 — pass on a development machine's Docker daemon, both against a warm network
 and from a cold `down -v` start that regenerates `mitmproxy`'s root, so the ids
 and severities it asserts against a live `mitmproxy`, `squid`, `dnsmasq` and
-`nginx` are observed rather than only written down. What is not yet proven is
-the same run on a hosted runner: the CI `harness` job executes the same compose
-file on every push, and until it has been green there, "it works on Linux
-containers" is a local result and this file will not claim more than that.
+`nginx` are observed rather than only written down. It has since also passed on a
+hosted runner: the CI `harness` job executes the same compose file on every
+push, and it went green on `c06c8c4` alongside the other six jobs — `verify` on
+all three OSes, `node-compat` on 22 and 24, and `binaries`. That is one green
+run on one runner, not a claim about every runner.
 
 [test/harness/README.md](test/harness/README.md) has the per-service table of
 which condition each one plants and which finding it provokes, the fixed

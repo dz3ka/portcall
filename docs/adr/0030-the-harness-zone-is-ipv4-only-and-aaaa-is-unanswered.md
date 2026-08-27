@@ -60,9 +60,10 @@ exactly the kind of detail a later reader deletes while tidying.
 
 The property being protected is ADR-0025's: **a healthcheck proves the planted
 condition holds, not that a process booted.** `-type=a` keeps the check aimed at
-the split horizon — the planted name still has to answer, and still has to
-answer `10.31.0.20` — while no longer failing on a query for a record the zone
-was never meant to have.
+the split horizon — the planted name still has to answer over A, and because
+`no-resolv` and `no-hosts` leave the zone with no upstream and no hosts file,
+the planted address is the only A it can answer with — while no longer failing
+on a query for a record the zone was never meant to have.
 
 ## Alternatives considered
 
