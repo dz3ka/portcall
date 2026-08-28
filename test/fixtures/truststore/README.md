@@ -7,6 +7,13 @@
   ADR-0033) and writes the child's raw stdout, plus a JSON sidecar describing how the capture was
   produced.
 
+- `runtime/` — the **runtime** store discovery tree read by
+  `test/net-runtime-stores.test.ts`: a virtualenv (posix and Windows layouts), a JDK 9+ and a JDK 8
+  tree, an `SSL_CERT_DIR`, a per-user certifi under a fake `HOME`. It is a *layout*, not a
+  recording — nothing in it was copied off a machine, its PEMs are minted by this repo's
+  `syntheticCert` helper, and its `cacerts` files are ASCII placeholders that are deliberately not
+  keystores. `runtime/make-tree.ts` rebuilds it and says why at length.
+
 ## What is deliberately *not* here
 
 **There is no macOS fixture, and one must not be written by hand.**
