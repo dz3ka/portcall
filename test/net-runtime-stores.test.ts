@@ -27,11 +27,24 @@ import type { RuntimeStoreKind, RuntimeStoreOutcome } from '../src/net/types.ts'
  *    directory where a bundle should be, a scan with more matches than the cap)
  *    use a temp dir.
  *
- * Every case passes `platform` explicitly, so the linux, darwin and win32
- * branches are all exercised on whichever runner the suite is on. Only the
- * host-independent part of a table can be reached that way - no test can
- * conjure `/usr/lib/jvm` - which is why the tables' own shape is asserted
- * directly at the end.
+ * Every case passes `platform` and `env` explicitly - the reader reads
+ * neither off `process` - so the linux, darwin and win32 branches are all
+ * exercised on whichever runner the suite is on.
+ *
+ * The environment is not the only thing a case has to control, though. The
+ * table rows that glob under `/usr/lib/jvm` and `/usr/lib/python3` name
+ * absolute host paths, and a CI runner has real JDKs and a real system Python
+ * sitting on exactly those paths. Discovery finds them - correctly - so a case
+ * about the fixture tree that counted outcomes counted the runner's software.
+ * Every case about a *found* store therefore either asks for a platform the
+ * reader has no table for (`NO_TABLE`, below), which confines discovery to
+ * what the environment names, or asserts on the store inside the fixture tree
+ * (`oneFromFixtures`). Nothing here may depend on what is installed on the
+ * machine running it, in either direction.
+ *
+ * Only the host-independent part of a table can be reached from a test - no
+ * test can conjure `/usr/lib/jvm` - which is why the tables' own shape is
+ * asserted directly at the end.
  */
 
 const FIXTURES = join(import.meta.dirname, 'fixtures', 'truststore', 'runtime');
@@ -67,6 +80,30 @@ function ofKind(outcomes: readonly RuntimeStoreOutcome[], kind: RuntimeStoreKind
 function one(outcomes: readonly RuntimeStoreOutcome[], kind: RuntimeStoreKind): RuntimeStoreOutcome {
   const matches = ofKind(outcomes, kind);
   expect(matches, `expected exactly one ${kind} outcome`).toHaveLength(1);
+  return matches[0] as RuntimeStoreOutcome;
+}
+
+/**
+ * A platform the reader has no discovery table for, so the only paths it can
+ * reach are the ones `JAVA_HOME` and `VIRTUAL_ENV` name. A case that asks for
+ * it is searching the fixture tree and nothing else, on every runner. That half
+ * of discovery is platform-independent apart from how a locator is spelled, and
+ * `samePath` normalises that away.
+ */
+const NO_TABLE: NodeJS.Platform = 'freebsd';
+
+/**
+ * The one outcome of `kind` naming a store inside the fixture tree, for a case
+ * that needs a real platform table and so cannot ask for exactly one outcome: a
+ * runner with a system certifi contributes rows of its own, and that is the
+ * reader working rather than a failure.
+ */
+function oneFromFixtures(outcomes: readonly RuntimeStoreOutcome[], kind: RuntimeStoreKind): RuntimeStoreOutcome {
+  const root = FIXTURES.split('\\').join('/');
+  const matches = ofKind(outcomes, kind).filter((outcome) =>
+    (outcome.locator?.split('\\').join('/') ?? '').startsWith(root),
+  );
+  expect(matches, `expected exactly one ${kind} outcome under the fixture tree`).toHaveLength(1);
   return matches[0] as RuntimeStoreOutcome;
 }
 
@@ -223,24 +260,35 @@ describe('python', () => {
   });
 
   it('finds certifi inside a posix virtualenv', async () => {
-    const certifi = one(await read(['python'], 'linux', { VIRTUAL_ENV: fixture('virtualenv') }), 'python-certifi');
+    const certifi = one(await read(['python'], NO_TABLE, { VIRTUAL_ENV: fixture('virtualenv') }), 'python-certifi');
     samePath(certifi.locator, fixture('virtualenv', 'lib', 'python3.12', 'site-packages', 'certifi', 'cacert.pem'));
     expect(certifi.combines).toBe('standalone');
     expect(certifi.pems).toHaveLength(1);
   });
 
-  it('finds certifi inside a Windows virtualenv, where site-packages sits under Lib', async () => {
-    const certifi = one(await read(['python'], 'win32', { VIRTUAL_ENV: fixture('virtualenv-win') }), 'python-certifi');
+  it('finds certifi inside a virtualenv that puts site-packages under Lib, as a Windows one does', async () => {
+    // Both spellings are tried on every platform, because a venv can be copied
+    // between machines (see `certifiStores`), so the `Lib` layout is reachable
+    // without asking for `win32` - which would spell this fixture's own posix
+    // path the Windows way and find nothing on a posix runner.
+    const certifi = one(await read(['python'], NO_TABLE, { VIRTUAL_ENV: fixture('virtualenv-win') }), 'python-certifi');
+    samePath(certifi.locator, fixture('virtualenv-win', 'Lib', 'site-packages', 'certifi', 'cacert.pem'));
     expect(certifi.pems).toHaveLength(1);
   });
 
   it('finds a per-user certifi by glob under HOME, with no variable set at all', async () => {
-    const certifi = one(await read(['python'], 'linux', { HOME: fixture('home') }), 'python-certifi');
+    // The one case that needs a platform table - the `~` row is in it - and so
+    // the one that also reads past the fixture tree on a runner with a system
+    // certifi installed.
+    const certifi = oneFromFixtures(await read(['python'], 'linux', { HOME: fixture('home') }), 'python-certifi');
     samePath(certifi.locator, fixture('home', '.local', 'lib', 'python3.13', 'site-packages', 'certifi', 'cacert.pem'));
   });
 
   it('reports one not-found outcome, listing where it looked, when there is no certifi', async () => {
-    const certifi = one(await read(['python'], 'linux', { HOME: fixture('does-not-exist') }), 'python-certifi');
+    // A virtualenv that is not there: two patterns tried, nothing behind
+    // either, and the row saying so is the point. Named through the fixture
+    // tree so the answer cannot depend on the runner having a certifi.
+    const certifi = one(await read(['python'], NO_TABLE, { VIRTUAL_ENV: fixture('does-not-exist') }), 'python-certifi');
     expect(certifi.failure).toBe('not-found');
     expect(certifi.locator).toBeNull();
     expect(certifi.searched.length).toBeGreaterThan(0);
@@ -250,7 +298,7 @@ describe('python', () => {
 
 describe('java', () => {
   it('finds the JDK 9+ cacerts under JAVA_HOME and judges it on its own', async () => {
-    const cacerts = one(await read(['java'], 'linux', { JAVA_HOME: fixture('java-home-9') }), 'java-cacerts');
+    const cacerts = one(await read(['java'], NO_TABLE, { JAVA_HOME: fixture('java-home-9') }), 'java-cacerts');
     samePath(cacerts.locator, fixture('java-home-9', 'lib', 'security', 'cacerts'));
     expect(cacerts.combines).toBe('standalone');
     // WP3 locates the store. The keystore reader is what turns it into PEMs.
@@ -261,19 +309,23 @@ describe('java', () => {
   });
 
   it('finds the JDK 8 cacerts, which lives one level deeper', async () => {
-    const cacerts = one(await read(['java'], 'linux', { JAVA_HOME: fixture('java-home-8') }), 'java-cacerts');
+    const cacerts = one(await read(['java'], NO_TABLE, { JAVA_HOME: fixture('java-home-8') }), 'java-cacerts');
     samePath(cacerts.locator, fixture('java-home-8', 'jre', 'lib', 'security', 'cacerts'));
   });
 
   it('names the places it looked when there is no JDK', async () => {
-    const cacerts = one(await read(['java'], 'linux', {}), 'java-cacerts');
+    // `JAVA_HOME` pointed at a directory that is not there, rather than an empty
+    // environment: this case pins "a runtime with nothing installed still gets
+    // a row", and on a runner with a JDK in `/usr/lib/jvm` an empty environment
+    // reaches a real store and never exercises that branch at all.
+    const cacerts = one(await read(['java'], NO_TABLE, { JAVA_HOME: fixture('does-not-exist') }), 'java-cacerts');
     expect(cacerts.failure).toBe('not-found');
     expect(cacerts.locator).toBeNull();
     expect(cacerts.searched.join('\n')).toContain('cacerts');
   });
 
   it('refuses a cacerts larger than the cap', async () => {
-    const cacerts = one(await read(['java'], 'linux', { JAVA_HOME: fixture('java-home-9') }, 4), 'java-cacerts');
+    const cacerts = one(await read(['java'], NO_TABLE, { JAVA_HOME: fixture('java-home-9') }, 4), 'java-cacerts');
     expect(cacerts.failure).toBe('output-too-large');
   });
 });
