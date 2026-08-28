@@ -217,6 +217,64 @@ describe('os trust store reader kill paths', () => {
   });
 });
 
+/**
+ * What the child is allowed to inherit. Asserted through `readOneStore` rather
+ * than against `minimalEnv` directly, because the claim is about the process
+ * that actually gets started: the child reports what it can see in its own exit
+ * code, since nothing else it writes is allowed to reach the outcome.
+ */
+describe('os trust store reader child environment', () => {
+  /** `node -e` that exits with the number of names in `names` it can see. */
+  function reportsPresent(names: readonly string[]): TrustStoreCommand {
+    const list = JSON.stringify(names);
+    return nodeCommand(`process.exit(${list}.filter((n) => process.env[n] !== undefined).length);`, 'pem-stream');
+  }
+
+  /** `node -e` that exits with the number of names in `names` it cannot see. */
+  function reportsMissing(names: readonly string[]): TrustStoreCommand {
+    const list = JSON.stringify(names);
+    return nodeCommand(`process.exit(${list}.filter((n) => process.env[n] === undefined).length);`, 'pem-stream');
+  }
+
+  it('passes nothing a customer sets, however loudly it is set in this process', async () => {
+    // An inherited `PSModulePath` is the sharpest of these: it stops the module
+    // providing the `Cert:` drive from loading, so a child that could see one
+    // would not read the store at all. Planted here so the test cannot pass by
+    // the parent simply not having them.
+    const planted = ['PSModulePath', 'HTTP_PROXY', 'JAVA_TOOL_OPTIONS'];
+    const saved = new Map(planted.map((name) => [name, process.env[name]]));
+    for (const name of planted) process.env[name] = 'planted-by-the-test';
+    try {
+      const outcome = await readOneStore(reportsPresent(planted), {
+        signal: quiet(),
+        timeoutMs: SUBPROCESS_TIMEOUT_MS,
+      });
+      expect(outcome.code, 'a variable the reader must never pass reached the child').toBe(null);
+      expect(outcome.failure).toBe('no-certificates');
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  it('passes the scratch locations PowerShell needs to cache its module analysis', async () => {
+    // win32 only: everywhere else the child's environment is empty by design,
+    // and the cost these names buy back is a Windows one (see `minimalEnv`).
+    if (process.platform !== 'win32') return;
+    const expected = ['SystemRoot', 'PATHEXT', 'TEMP', 'TMP', 'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'ComSpec'];
+    const present = expected.filter((name) => process.env[name] !== undefined);
+    expect(present.length, 'this Windows host sets none of them, so the test would be vacuous').toBeGreaterThan(0);
+    const outcome = await readOneStore(reportsMissing(present), {
+      signal: quiet(),
+      timeoutMs: SUBPROCESS_TIMEOUT_MS,
+    });
+    expect(outcome.code, 'a scratch location this process has did not reach the child').toBe(null);
+    expect(outcome.failure).toBe('no-certificates');
+  });
+});
+
 describe('os trust store reader formats', () => {
   it('parses a pem-stream child into one entry per certificate', async () => {
     const pems = await twoSyntheticPems();

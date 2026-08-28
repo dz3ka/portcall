@@ -38,9 +38,15 @@ import type { OsTrustStoreReader, TrustStoreCommand, TrustStoreFailure, TrustSto
  * shelling out where a file read would do would be a subprocess bought for
  * consistency's sake.
  *
- * Measured on Windows 11 (2026-08-28): the pinned PowerShell command returns 41
- * roots in ~0.9 s, one unwrapped base64 DER per line, exit 0, empty stderr. The
- * macOS command's output shape is **not** measured - see
+ * Measured on Windows 11 (2026-08-28): the pinned PowerShell command returns one
+ * unwrapped base64 DER per line, exit 0, empty stderr - but how much comes back
+ * and how long it takes belong to the host, not to the command. A developer
+ * laptop answers with 41 roots in ~0.2 s; a windows-latest CI runner answered
+ * with 563 roots in 42.9 s under the unamended `minimalEnv()` below. The runner
+ * is the figure that governs - it is the machine the milestone is judged on, and
+ * a laptop number quoted here once already read as a promise the runner does not
+ * keep - and the scratch-location passthrough in `minimalEnv()` is what
+ * addresses it. The macOS command's output shape is **not** measured - see
  * `test/fixtures/truststore/record-stores.ts`, which records it from a real
  * runner. Until that has run, the `pem-stream` branch is written against
  * Apple's documentation.
@@ -98,18 +104,54 @@ export const SUBPROCESS_TIMEOUT_MS = 5_000;
 export const MAX_STORE_OUTPUT_BYTES = 4 * 1024 * 1024;
 
 /**
- * The child's whole environment. `SystemRoot` is what lets PowerShell find its
- * own DLLs, and `PATHEXT` is read by the loader on the same platform; nothing
- * else is passed anywhere, so a customer's `HTTP_PROXY`, `JAVA_TOOL_OPTIONS` or
- * `PSModulePath` cannot change what the reader does.
+ * The child's whole environment, and deliberately almost none of one.
+ * `SystemRoot` is what lets PowerShell find its own DLLs and `PATHEXT` is read
+ * by the loader on the same platform. The six scratch locations after them -
+ * `TEMP`, `TMP`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `ComSpec` - are here
+ * because starving PowerShell of a place to keep its `ModuleAnalysisCache` is
+ * not free: with no `LOCALAPPDATA` and no `APPDATA` the cache can be neither
+ * read nor written, so every module is re-analysed on every single spawn.
+ * Measured on a windows-latest runner (2026-08-28): bare PowerShell startup took
+ * 5853 ms under `{SystemRoot, PATHEXT}` against 151 ms under the inherited
+ * environment, and the machine-root read took 42859 ms of which
+ * `firstByteMs=42776` - 99.8% of the wait is over before the first byte of
+ * output exists.
+ *
+ * That list is the whole amendment, and handing the child the inherited
+ * environment instead is **not** the shorter version of it. That was measured
+ * too, and it does not read the store at all: exit 1, "Cannot find drive. A
+ * drive with the name 'Cert' does not exist", because an inherited
+ * `PSModulePath` stops `Microsoft.PowerShell.Security` - the module that
+ * provides the `Cert:` drive - from loading. So `PSModulePath` is not an
+ * oversight here, it is the point; and `PATH`, `HTTP_PROXY` and
+ * `JAVA_TOOL_OPTIONS` stay out for the older reason, that nothing a customer
+ * sets may change what the reader does.
+ *
+ * One thing this function cannot enforce: on Windows, libuv adds a floor of its
+ * own to whatever `env` a spawn is given, copying `PATH`, `TEMP`, `USERPROFILE`,
+ * `WINDIR` and a handful more from the parent regardless. That is precisely why
+ * every `file` in the table above is an absolute path - `PATH` reaches the child
+ * whatever is written here, so it must never be the thing that finds the binary.
  */
 function minimalEnv(): NodeJS.ProcessEnv {
   if (process.platform !== 'win32') return {};
   const env: NodeJS.ProcessEnv = {};
   const systemRoot = process.env.SystemRoot;
   const pathExt = process.env.PATHEXT;
+  const temp = process.env.TEMP;
+  const tmp = process.env.TMP;
+  const localAppData = process.env.LOCALAPPDATA;
+  const appData = process.env.APPDATA;
+  const userProfile = process.env.USERPROFILE;
+  const comSpec = process.env.ComSpec;
   if (systemRoot !== undefined) env.SystemRoot = systemRoot;
   if (pathExt !== undefined) env.PATHEXT = pathExt;
+  if (temp !== undefined) env.TEMP = temp;
+  if (tmp !== undefined) env.TMP = tmp;
+  if (localAppData !== undefined) env.LOCALAPPDATA = localAppData;
+  if (appData !== undefined) env.APPDATA = appData;
+  if (userProfile !== undefined) env.USERPROFILE = userProfile;
+  if (comSpec !== undefined) env.ComSpec = comSpec;
   return env;
 }
 
