@@ -29,7 +29,13 @@ const READER = 'net/os-truststore.ts';
  * `no-credential-access.test.ts` would stay silent for that.
  */
 
-/** The command table exactly as it must be. Written out, not imported and reformatted. */
+/**
+ * The command table exactly as it must be. Written out, not imported and
+ * reformatted. `timeoutMs` is pinned here for the same reason every other field
+ * is (ADR-0037): it is the healthy-read ceiling for that store on that
+ * platform, so raising it - which is how a hung read gets accommodated instead
+ * of reported - has to arrive as a diff a reviewer reads.
+ */
 const EXPECTED_COMMANDS = [
   {
     platform: 'darwin',
@@ -38,6 +44,7 @@ const EXPECTED_COMMANDS = [
     argv: ['find-certificate', '-a', '-p', '/System/Library/Keychains/SystemRootCertificates.keychain'],
     locator: '/System/Library/Keychains/SystemRootCertificates.keychain',
     format: 'pem-stream',
+    timeoutMs: 5_000,
   },
   {
     platform: 'darwin',
@@ -46,6 +53,7 @@ const EXPECTED_COMMANDS = [
     argv: ['find-certificate', '-a', '-p', '/Library/Keychains/System.keychain'],
     locator: '/Library/Keychains/System.keychain',
     format: 'pem-stream',
+    timeoutMs: 5_000,
   },
   {
     platform: 'win32',
@@ -60,6 +68,7 @@ const EXPECTED_COMMANDS = [
     ],
     locator: 'Cert:\\LocalMachine\\Root',
     format: 'base64-der-lines',
+    timeoutMs: 5_000,
   },
 ];
 

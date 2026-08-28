@@ -6,8 +6,9 @@ import { derToPem, pemBlocks } from '../src/net/pem.ts';
 import {
   LINUX_CA_BUNDLE_PATHS,
   MAX_STORE_OUTPUT_BYTES,
+  MIN_STORE_BUDGET_MS,
   OS_TRUSTSTORE_COMMANDS,
-  SUBPROCESS_TIMEOUT_MS,
+  STORE_BUDGET_RESERVE_MS,
   osTrustStoreReader,
   readLinuxCaBundle,
   readOneStore,
@@ -44,6 +45,25 @@ function quiet(): AbortSignal {
   return RUN.signal;
 }
 
+/**
+ * The budget the kill-path cases hand `readOneStore` directly. It is the
+ * test's own number, not a production one: those cases drive a synthetic
+ * `node -e` command that is not on the pinned table and therefore has no row
+ * budget of its own. Production budgets live on the table rows, and the only
+ * thing allowed to choose one is `osTrustStoreReader.read` (ADR-0037).
+ */
+const KILL_PATH_BUDGET_MS = 5_000;
+
+/** A deadline far enough out that every row gets its whole `timeoutMs`. */
+function generousDeadline(): number {
+  return Date.now() + 60_000;
+}
+
+/** The pinned budget of the row for `kind`, or `null` if this platform has no such row. */
+function rowBudget(kind: string): number | null {
+  return OS_TRUSTSTORE_COMMANDS.find((command) => command.kind === kind)?.timeoutMs ?? null;
+}
+
 /** One command that runs `node -e <script>`; the file is absolute by construction. */
 function nodeCommand(script: string, format: 'pem-stream' | 'base64-der-lines'): TrustStoreCommand {
   return {
@@ -53,6 +73,7 @@ function nodeCommand(script: string, format: 'pem-stream' | 'base64-der-lines'):
     argv: ['-e', script],
     locator: process.execPath,
     format,
+    timeoutMs: KILL_PATH_BUDGET_MS,
   };
 }
 
@@ -155,8 +176,9 @@ describe('os trust store reader kill paths', () => {
         argv: ['-a'],
         locator: missing,
         format: 'pem-stream',
+        timeoutMs: KILL_PATH_BUDGET_MS,
       },
-      { signal: quiet(), timeoutMs: SUBPROCESS_TIMEOUT_MS },
+      { signal: quiet(), timeoutMs: KILL_PATH_BUDGET_MS },
     );
     expect(outcome.failure).toBe('reader-missing');
     expect(outcome.code).toBe('ENOENT');
@@ -200,7 +222,7 @@ describe('os trust store reader kill paths', () => {
   it('reports a non-zero exit as reader-failed with the exit code, never a message', async () => {
     const outcome = await readOneStore(nodeCommand('process.exit(3);', 'pem-stream'), {
       signal: quiet(),
-      timeoutMs: SUBPROCESS_TIMEOUT_MS,
+      timeoutMs: KILL_PATH_BUDGET_MS,
     });
     expect(outcome.failure).toBe('reader-failed');
     expect(outcome.code).toBe('exit:3');
@@ -210,7 +232,7 @@ describe('os trust store reader kill paths', () => {
     const script = `process.stderr.write('SECRET-STDERR-/Users/someone/private'); process.stdout.write('no certificates here');`;
     const outcome = await readOneStore(nodeCommand(script, 'pem-stream'), {
       signal: quiet(),
-      timeoutMs: SUBPROCESS_TIMEOUT_MS,
+      timeoutMs: KILL_PATH_BUDGET_MS,
     });
     expect(outcome.failure).toBe('no-certificates');
     expect(JSON.stringify(outcome)).not.toContain('SECRET-STDERR');
@@ -247,7 +269,7 @@ describe('os trust store reader child environment', () => {
     try {
       const outcome = await readOneStore(reportsPresent(planted), {
         signal: quiet(),
-        timeoutMs: SUBPROCESS_TIMEOUT_MS,
+        timeoutMs: KILL_PATH_BUDGET_MS,
       });
       expect(outcome.code, 'a variable the reader must never pass reached the child').toBe(null);
       expect(outcome.failure).toBe('no-certificates');
@@ -268,7 +290,7 @@ describe('os trust store reader child environment', () => {
     expect(present.length, 'this Windows host sets none of them, so the test would be vacuous').toBeGreaterThan(0);
     const outcome = await readOneStore(reportsMissing(present), {
       signal: quiet(),
-      timeoutMs: SUBPROCESS_TIMEOUT_MS,
+      timeoutMs: KILL_PATH_BUDGET_MS,
     });
     expect(outcome.code, 'a scratch location this process has did not reach the child').toBe(null);
     expect(outcome.failure).toBe('no-certificates');
@@ -340,21 +362,133 @@ describe('linux ca bundle read', () => {
 
 describe('os trust store reader on this platform', () => {
   it('returns one outcome per pinned store for the running platform', async () => {
-    const outcomes = await osTrustStoreReader.read({ signal: quiet(), timeoutMs: 20_000 });
+    const outcomes = await osTrustStoreReader.read({ signal: quiet(), deadline: generousDeadline() });
     expect(outcomes.map((outcome) => outcome.kind)).toEqual(platformKinds());
     for (const outcome of outcomes) assertWellFormed(outcome);
   });
 
-  it('actually reads at least one store on a supported platform', async () => {
+  /**
+   * What `verify` is allowed to claim about a live read, and no more. A store
+   * that answers is asserted all the way down to the PEM; a store that runs
+   * past its budget is a fact about *this machine* and the milestone's own
+   * subject matter, so it passes here and the e2e job (WP7) is where a
+   * successful Windows read is asserted against an injected root.
+   *
+   * Every other failure class still fails: `reader-missing` and `reader-failed`
+   * mean the pinned command is wrong for this platform, `no-certificates` means
+   * the parser lost the output, and `aborted` means the run signal fired inside
+   * `verify`, which nothing here does.
+   */
+  it('either reads a store or reports it as out of budget - nothing else passes', async () => {
     if (platformKinds().length === 0) return;
-    const outcomes = await osTrustStoreReader.read({ signal: quiet(), timeoutMs: 20_000 });
-    const read = outcomes.filter((outcome) => outcome.failure === null);
-    const detail = JSON.stringify(outcomes.map((outcome) => [outcome.kind, outcome.failure, outcome.code]));
-    expect(read.length, `no store read on ${process.platform}: ${detail}`).toBeGreaterThan(0);
-    for (const outcome of read) {
-      expect(outcome.pems.length).toBeGreaterThan(0);
-      for (const pem of outcome.pems) expect(pem).toMatch(/^-----BEGIN CERTIFICATE-----\n/);
+    const outcomes = await osTrustStoreReader.read({ signal: quiet(), deadline: generousDeadline() });
+    const detail = JSON.stringify(
+      outcomes.map((outcome) => [outcome.kind, outcome.failure, outcome.code, outcome.budgetMs]),
+    );
+    expect(outcomes.length, `no outcome on ${process.platform}: ${detail}`).toBeGreaterThan(0);
+    for (const outcome of outcomes) {
+      assertWellFormed(outcome);
+      if (outcome.failure === null) {
+        expect(outcome.pems.length, detail).toBeGreaterThan(0);
+        for (const pem of outcome.pems) expect(pem).toMatch(/^-----BEGIN CERTIFICATE-----\n/);
+        continue;
+      }
+      expect(outcome.failure, detail).toBe('timeout');
+      expect(['signal:SIGKILL', 'budget-exhausted'], detail).toContain(outcome.code);
     }
+  });
+});
+
+/**
+ * The read budget (ADR-0037). It belongs to the pinned row and is clamped by
+ * the run's deadline, so there is no caller-supplied number for the constant
+ * and the test to drift apart on.
+ */
+describe('os trust store read budget', () => {
+  /** True where `read()` starts a child; on linux it opens a file instead. */
+  const spawns = OS_TRUSTSTORE_COMMANDS.some((command) => command.platform === process.platform);
+
+  it('cuts a row budget down to what the run deadline leaves', async () => {
+    // 3.5 s minus the 2 s reserve is 1.5 s: under every row ceiling, over the
+    // minimum, so the first store is still spawned - with a smaller budget.
+    const outcomes = await osTrustStoreReader.read({ signal: quiet(), deadline: Date.now() + 3_500 });
+    if (!spawns) {
+      expect(outcomes.map((outcome) => outcome.budgetMs)).toEqual([null]);
+      return;
+    }
+    const [first] = outcomes;
+    expect(first).toBeDefined();
+    if (first === undefined) return;
+    const ceiling = rowBudget(first.kind);
+    expect(ceiling, `${first.kind} has no pinned row budget`).not.toBeNull();
+    expect(first.budgetMs).not.toBeNull();
+    expect(first.budgetMs ?? 0).toBeGreaterThanOrEqual(MIN_STORE_BUDGET_MS);
+    expect(first.budgetMs ?? 0, 'the deadline did not clamp anything').toBeLessThan(ceiling ?? 0);
+    // A store the clamp let run either answers or is killed at the cut budget;
+    // a later store on the same platform may have nothing left at all.
+    for (const outcome of outcomes) {
+      expect(outcome.budgetMs ?? 0).toBeLessThan(rowBudget(outcome.kind) ?? 0);
+      if (outcome.failure !== null) {
+        expect(outcome.failure).toBe('timeout');
+        expect(['signal:SIGKILL', 'budget-exhausted']).toContain(outcome.code);
+      }
+    }
+  });
+
+  it('starts no process at all once less than the minimum budget is left', async () => {
+    const outcomes = await osTrustStoreReader.read({ signal: quiet(), deadline: Date.now() - 1 });
+    if (!spawns) {
+      expect(outcomes.map((outcome) => outcome.budgetMs)).toEqual([null]);
+      return;
+    }
+    for (const outcome of outcomes) {
+      expect(outcome.failure).toBe('timeout');
+      expect(outcome.code).toBe('budget-exhausted');
+      expect(outcome.budgetMs).toBe(0);
+      expect(outcome.pems).toEqual([]);
+    }
+    expect(STORE_BUDGET_RESERVE_MS).toBeGreaterThan(MIN_STORE_BUDGET_MS);
+  });
+
+  it('reports no budget for a sub-minimum budget that is not yet zero', async () => {
+    // Lands `effective` inside (0, MIN_STORE_BUDGET_MS): the branch fires, and
+    // the value that decided it is not the value the outcome may report.
+    const deadline = Date.now() + STORE_BUDGET_RESERVE_MS + MIN_STORE_BUDGET_MS / 2;
+    const outcomes = await osTrustStoreReader.read({ signal: quiet(), deadline });
+    if (!spawns) {
+      expect(outcomes.map((outcome) => outcome.budgetMs)).toEqual([null]);
+      return;
+    }
+    for (const outcome of outcomes) {
+      expect(outcome.code).toBe('budget-exhausted');
+      expect(outcome.budgetMs, 'a store no child was started for reported a budget').toBe(0);
+    }
+  });
+
+  it('lets an already-fired run signal outrank both budget branches', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const outcomes = await osTrustStoreReader.read({ signal: controller.signal, deadline: Date.now() - 1 });
+    if (!spawns) {
+      expect(outcomes.map((outcome) => outcome.budgetMs)).toEqual([null]);
+      return;
+    }
+    // "The operator pressed Ctrl-C" is not a claim about this machine's budget,
+    // and reporting it as one would be the conflation ADR-0009 forbids.
+    for (const outcome of outcomes) {
+      expect(outcome.failure).toBe('aborted');
+      expect(outcome.code).toBe('run-signal');
+      expect(outcome.budgetMs).toBe(0);
+    }
+  });
+
+  it('gives the Linux bundle no budget, because it starts no process', async () => {
+    const absent = join(process.cwd(), 'portcall-no-such-bundle.crt');
+    const outcome = await readLinuxCaBundle([absent], MAX_STORE_OUTPUT_BYTES);
+    expect(outcome.budgetMs).toBeNull();
+    if (process.platform !== 'linux') return;
+    const outcomes = await osTrustStoreReader.read({ signal: quiet(), deadline: generousDeadline() });
+    expect(outcomes.map((each) => each.budgetMs)).toEqual([null]);
   });
 });
 
@@ -370,5 +504,13 @@ function assertWellFormed(outcome: TrustStoreOutcome): void {
   expect(outcome.pems.length === 0).toBe(outcome.failure !== null);
   const stores = [...OS_TRUSTSTORE_COMMANDS.map((command) => command.locator), ...LINUX_CA_BUNDLE_PATHS];
   expect(stores, `${outcome.locator} is not a store this build reads`).toContain(outcome.locator);
-  if (outcome.code !== null) expect(outcome.code).toMatch(/^(?:[A-Z][A-Z0-9_]*|exit:\d+|signal:[A-Z0-9]+|run-signal)$/);
+  if (outcome.code !== null) {
+    expect(outcome.code).toMatch(/^(?:[A-Z][A-Z0-9_]*|exit:\d+|signal:[A-Z0-9]+|run-signal|budget-exhausted)$/);
+  }
+  // Null is the file read's answer and only the file read's: a budget is a
+  // statement about a child process, and the linux branch starts none.
+  if (outcome.kind === 'linux-ca-bundle') expect(outcome.budgetMs).toBeNull();
+  else expect(outcome.budgetMs, `${outcome.kind} reported no budget`).not.toBeNull();
+  // Zero is the whole no-spawn signal, so it may not leak onto a read that ran.
+  if (outcome.code === 'budget-exhausted') expect(outcome.budgetMs).toBe(0);
 }

@@ -217,7 +217,7 @@ export type TrustStoreFailure =
   | 'reader-missing' // the absolute-path binary or the file does not exist
   | 'reader-failed' // non-zero exit, or killed by a signal we did not send
   | 'aborted' // the run's AbortSignal fired; the child was killed. Says nothing about this machine
-  | 'timeout' // exceeded SUBPROCESS_TIMEOUT_MS; the child was killed
+  | 'timeout' // the store's read budget ran out. `code` says which end of it (ADR-0037)
   | 'output-too-large' // exceeded MAX_STORE_OUTPUT_BYTES; the child was killed
   | 'no-certificates'; // ran cleanly, parsed nothing
 
@@ -235,8 +235,31 @@ export interface TrustStoreOutcome {
   locator: string;
   pems: readonly string[];
   failure: TrustStoreFailure | null;
-  /** Machine code only - exit:1, signal:SIGKILL, ENOENT, run-signal. Never the child's stderr (ADR-0009). */
+  /**
+   * Machine code only - exit:1, signal:SIGKILL, ENOENT, run-signal,
+   * budget-exhausted. Never the child's stderr (ADR-0009).
+   */
   code: string | null;
+  /**
+   * The budget the child actually got, after the run deadline clamped the
+   * row's own ceiling (ADR-0037). **Zero means no child was started**: both
+   * no-spawn paths - `budget-exhausted`, and a run signal that had already
+   * fired - report 0, because a budget is a statement about a process and
+   * neither of them has one. `null` for the linux bundle, which starts no
+   * process by design and has no row ceiling to be measured against.
+   *
+   * Two consumers, and the second is why it is on the outcome rather than a
+   * local in the reader. It is `number` evidence on the finding, *and* it is
+   * how the probe tells apart the two ways a `timeout` happens, which are two
+   * different operator actions: `budgetMs` below the row's `timeoutMs` in
+   * `OS_TRUSTSTORE_COMMANDS` means the run's remaining time was what bound, so
+   * a longer `--timeout` is the fix; `budgetMs` equal to it means the store
+   * itself outran a healthy ceiling on this machine, and a longer `--timeout`
+   * would only wait longer for the same answer. A remediation that says
+   * "re-run with --timeout raised" to a reader in the first case is true and in
+   * the second is a lie, so it may not be written once for both.
+   */
+  budgetMs: number | null;
 }
 
 export interface OsTrustStoreReader {
@@ -247,8 +270,14 @@ export interface OsTrustStoreReader {
    * **Postcondition, and the probe depends on it:** the array is empty *exactly
    * when* the platform is none of those three. That is what the probe turns into
    * `unsupported-platform`; nothing else may produce an empty array.
+   *
+   * `deadline` is the run's absolute deadline in `Date.now()` milliseconds - the
+   * one the engine already computes - and **not** a per-store timeout. The
+   * reader owns the per-store budget (a literal on the pinned row) and the run
+   * owns the run, so there is no caller-supplied number for the budget and a
+   * test to drift apart on (ADR-0037).
    */
-  read(options: { signal: AbortSignal; timeoutMs: number }): Promise<readonly TrustStoreOutcome[]>;
+  read(options: { signal: AbortSignal; deadline: number }): Promise<readonly TrustStoreOutcome[]>;
 }
 
 /**
@@ -273,6 +302,16 @@ export interface TrustStoreCommand {
   locator: string;
   /** How stdout becomes PEMs. */
   format: 'pem-stream' | 'base64-der-lines';
+  /**
+   * The healthy-read ceiling for this store on this platform, in milliseconds,
+   * clamped down by the run deadline but never up (ADR-0037). Derived from what
+   * a healthy read of *this* store costs, never from how long a sick
+   * environment took: a host that exceeds it gets a finding, not a longer wait.
+   * A source literal like every other field on the row, pinned by
+   * `test/guardrails/subprocess-boundary.test.ts`, so changing a budget is a
+   * reviewed diff rather than a quiet retune.
+   */
+  timeoutMs: number;
 }
 
 /** Where a runtime looks for roots. One value per store, not per runtime. */

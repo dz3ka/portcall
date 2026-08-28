@@ -64,6 +64,7 @@ const COMMAND_TABLE: readonly TrustStoreCommand[] = [
     argv: ['find-certificate', '-a', '-p', '/System/Library/Keychains/SystemRootCertificates.keychain'],
     locator: '/System/Library/Keychains/SystemRootCertificates.keychain',
     format: 'pem-stream',
+    timeoutMs: 5_000,
   },
   {
     platform: 'darwin',
@@ -72,6 +73,7 @@ const COMMAND_TABLE: readonly TrustStoreCommand[] = [
     argv: ['find-certificate', '-a', '-p', '/Library/Keychains/System.keychain'],
     locator: '/Library/Keychains/System.keychain',
     format: 'pem-stream',
+    timeoutMs: 5_000,
   },
   {
     platform: 'win32',
@@ -86,6 +88,7 @@ const COMMAND_TABLE: readonly TrustStoreCommand[] = [
     ],
     locator: 'Cert:\\LocalMachine\\Root',
     format: 'base64-der-lines',
+    timeoutMs: 5_000,
   },
 ];
 
@@ -100,8 +103,33 @@ export const OS_TRUSTSTORE_COMMANDS: readonly TrustStoreCommand[] = Object.freez
 
 export const LINUX_CA_BUNDLE_PATHS: readonly string[] = Object.freeze([...LINUX_PATHS]);
 
-export const SUBPROCESS_TIMEOUT_MS = 5_000;
+/**
+ * Left unspent out of the run's remaining time, so that a store read cannot
+ * consume the moment the probe needs to turn its outcomes into findings. A run
+ * that spends its last millisecond on the read has nothing left to say what it
+ * learned.
+ */
+export const STORE_BUDGET_RESERVE_MS = 2_000;
+
+/**
+ * Below this much room, do not start the child: report, do not gamble. A
+ * sub-second budget cannot read any store this table names, so spawning into it
+ * buys a `signal:SIGKILL` that blames the machine for the run's own clock -
+ * `budget-exhausted` is the honest answer and it costs no process.
+ */
+export const MIN_STORE_BUDGET_MS = 1_000;
+
 export const MAX_STORE_OUTPUT_BYTES = 4 * 1024 * 1024;
+
+/**
+ * What this store may have of what is left. The row's ceiling is the healthy
+ * read on that platform; the deadline is the run's, and only ever cuts it
+ * down. Never negative: a budget of zero is a number a finding can print
+ * (ADR-0037).
+ */
+function storeBudgetMs(command: TrustStoreCommand, deadline: number): number {
+  return Math.max(0, Math.min(command.timeoutMs, deadline - Date.now() - STORE_BUDGET_RESERVE_MS));
+}
 
 /**
  * The child's whole environment, and deliberately almost none of one.
@@ -200,11 +228,26 @@ export function readOneStore(
   command: TrustStoreCommand,
   options: { signal: AbortSignal; timeoutMs: number },
 ): Promise<TrustStoreOutcome> {
-  const outcome = (failure: TrustStoreFailure | null, code: string | null, pems: readonly string[]): TrustStoreOutcome =>
-    ({ kind: command.kind, locator: command.locator, pems, failure, code });
+  // `budgetMs` is the budget this read was given, not the one the row asks
+  // for: the caller has already clamped it against the run deadline, and the
+  // difference between the two is what tells the probe whether a longer
+  // `--timeout` would have helped.
+  const outcome = (
+    failure: TrustStoreFailure | null,
+    code: string | null,
+    pems: readonly string[],
+  ): TrustStoreOutcome => ({
+    kind: command.kind,
+    locator: command.locator,
+    pems,
+    failure,
+    code,
+    budgetMs: options.timeoutMs,
+  });
 
   if (options.signal.aborted) {
-    return Promise.resolve(outcome('aborted', 'run-signal', []));
+    // Same rule as the budget branch in `read`: no child, no budget.
+    return Promise.resolve({ ...outcome('aborted', 'run-signal', []), budgetMs: 0 });
   }
 
   return new Promise<TrustStoreOutcome>((resolve) => {
@@ -302,7 +345,10 @@ export async function readLinuxCaBundle(paths: readonly string[], maxBytes: numb
     pems: readonly string[],
     failure: TrustStoreFailure | null,
     code: string | null,
-  ): TrustStoreOutcome => ({ kind: 'linux-ca-bundle', locator, pems, failure, code });
+    // No child, no timer, no budget: this branch opens a file, and a budget is
+    // a statement about a process. `null` says that, where a `0` would read as
+    // "it was given no time".
+  ): TrustStoreOutcome => ({ kind: 'linux-ca-bundle', locator, pems, failure, code, budgetMs: null });
 
   for (const path of paths) {
     let size: number;
@@ -337,16 +383,38 @@ export const osTrustStoreReader: OsTrustStoreReader = {
    *
    * The stores are read one at a time. There are at most two, each takes about
    * a second, and running them concurrently would put two children under one
-   * abort path for no measurable gain.
+   * abort path for no measurable gain. Serial also means the second store sees
+   * the time the first one spent: the budget is recomputed per store, so a
+   * keychain that runs long shortens its neighbour rather than overrunning the
+   * run.
    */
-  async read(options: { signal: AbortSignal; timeoutMs: number }): Promise<readonly TrustStoreOutcome[]> {
+  async read(options: { signal: AbortSignal; deadline: number }): Promise<readonly TrustStoreOutcome[]> {
     if (process.platform === 'linux') {
       return [await readLinuxCaBundle(LINUX_CA_BUNDLE_PATHS, MAX_STORE_OUTPUT_BYTES)];
     }
     const outcomes: TrustStoreOutcome[] = [];
     for (const command of OS_TRUSTSTORE_COMMANDS) {
       if (command.platform !== process.platform) continue;
-      outcomes.push(await readOneStore(command, options));
+      const budgetMs = storeBudgetMs(command, options.deadline);
+      // A fired run signal outranks the budget branch: `readOneStore` answers
+      // an aborted signal without starting anything either, and "the operator
+      // pressed Ctrl-C" is not a claim about this machine's clock.
+      if (budgetMs < MIN_STORE_BUDGET_MS && !options.signal.aborted) {
+        outcomes.push({
+          kind: command.kind,
+          locator: command.locator,
+          pems: [],
+          failure: 'timeout',
+          code: 'budget-exhausted',
+          // No child was started, so no budget was applied: 0 is the reader's
+          // word for "nothing ran" (ADR-0037). The computed value is the reason
+          // for the branch, not a budget any process got, and printing it as one
+          // would tell an operator a store was read for 800 ms that never ran.
+          budgetMs: 0,
+        });
+        continue;
+      }
+      outcomes.push(await readOneStore(command, { signal: options.signal, timeoutMs: budgetMs }));
     }
     return outcomes;
   },
