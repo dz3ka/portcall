@@ -148,11 +148,14 @@ them. That gap is the failure this whole tool exists for: a laptop where the
 corporate root is installed and `curl` works fine, and Node, Go, Python or Java
 fails, because none of them reads the OS store the way the browser does.
 
-- **`truststore.os.read`** names the store that was read, how many anchors it
-  holds, and how many of those are *locally added* — present on this machine
-  and absent from the runtime's own public list. Described factually and never
-  as "a corporate root": a public root merely newer than a runtime's bundled
-  snapshot lands in the same set, and the finding must not overstate.
+- **`truststore.os.read`** names the store that was read, how many anchors
+  *that store* holds, and how many of those are *locally added* — present on
+  this machine and absent from the runtime's own public list. Described
+  factually and never as "a corporate root": a public root merely newer than a
+  runtime's bundled snapshot lands in the same set, and the finding must not
+  overstate. Where the store held a certificate portcall could not parse, the
+  count of those is on the finding too, so the anchor total reads as what was
+  cross-checked rather than as what was there.
 - **`truststore.<runtime>.missing-root`** — one clustered finding per store a
   runtime consults, listing up to five subject DNs. `degraded` on its own;
   **`blocker`** when the anchor correlates with one the `tls` probe watched

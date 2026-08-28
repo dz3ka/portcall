@@ -27,6 +27,21 @@ const PUBLIC_ROOT = 'CN=Example Public Root CA, O=Example Trust Services';
 const LOCAL_ROOT = 'CN=Acme Corp Internal Root, O=Acme Corp Ltd';
 const OTHER_LOCAL_ROOT = 'CN=Acme Corp Inspection CA, O=Acme Corp Ltd';
 
+/**
+ * Blocks the readers *do* hand on - well-formed base64 `CERTIFICATE` blocks -
+ * whose payload is not a certificate. That is the shape a malformed certificate
+ * in a customer's own store arrives in. Two of them, differing, because a store
+ * of identical blocks would also pass a test that deduplicated them away.
+ */
+const UNPARSABLE_PEM = ['-----BEGIN CERTIFICATE-----', 'bm90IGEgY2VydGlmaWNhdGU=', '-----END CERTIFICATE-----'].join(
+  '\n',
+);
+const OTHER_UNPARSABLE_PEM = [
+  '-----BEGIN CERTIFICATE-----',
+  'c3RpbGwgbm90IGEgY2VydGlmaWNhdGU=',
+  '-----END CERTIFICATE-----',
+].join('\n');
+
 let publicRootPem: string;
 let localRootPem: string;
 let localRootDer: Uint8Array;
@@ -157,6 +172,37 @@ describe('truststore cross-check', () => {
     const missing = byId(findings, 'truststore.node.missing-root');
     expect(evidence(missing, 'match')).toEqual(['issuer-name']);
     expect(missing.remediation).toContain('the match is by name and not by bytes');
+  });
+
+  /**
+   * Contract item 17. `indeterminate` says the `tls` probe could not tell a
+   * private anchor from a public one - routinely a public root re-issued under
+   * the same subject DN - and a name-only match against a maybe is not evidence
+   * that this chain is the one failing. The finding stays `degraded` and drops
+   * the correlation rather than rounding it up to `blocker`.
+   */
+  it('does not escalate a name-only match when the observed anchor class is indeterminate', () => {
+    const findings = crossCheck(input({ observedAnchors: [observed({ der: null, anchorClass: 'indeterminate' })] }));
+
+    expect(verdict(findings)).toEqual(['truststore.os.read=ok', 'truststore.node.missing-root=degraded']);
+    const missing = byId(findings, 'truststore.node.missing-root');
+    expect(evidence(missing, 'match')).toEqual([]);
+    expect(evidence(missing, 'host')).toEqual([]);
+  });
+
+  it('still escalates a name-only match when the observed anchor class is private', () => {
+    const findings = crossCheck(input({ observedAnchors: [observed({ der: null, anchorClass: 'private' })] }));
+
+    expect(verdict(findings)).toEqual(['truststore.os.read=ok', 'truststore.node.missing-root=blocker']);
+    expect(evidence(byId(findings, 'truststore.node.missing-root'), 'match')).toEqual(['issuer-name']);
+  });
+
+  /** Byte identity is proof on its own: the class it was graded as adds nothing. */
+  it('escalates a byte match whatever class the anchor was graded', () => {
+    const findings = crossCheck(input({ observedAnchors: [observed({ anchorClass: 'indeterminate' })] }));
+
+    expect(verdict(findings)).toEqual(['truststore.os.read=ok', 'truststore.node.missing-root=blocker']);
+    expect(evidence(byId(findings, 'truststore.node.missing-root'), 'match')).toEqual(['bytes']);
   });
 
   it('reports roots-present when the runtime holds every locally added anchor', () => {
@@ -347,6 +393,111 @@ describe('truststore cross-check', () => {
       OTHER_LOCAL_ROOT,
       LOCAL_ROOT,
     ]);
+  });
+
+  /**
+   * `locally added` sits on a *per-store* finding, so it counts that store: the
+   * run-wide deduplicated total printed under a store holding one anchor reads
+   * as a subset larger than the set it sits inside.
+   */
+  it('counts locally added per store rather than run-wide', () => {
+    const findings = crossCheck(
+      input({
+        platform: 'darwin',
+        osStores: [
+          osStore({
+            kind: 'macos-system-roots',
+            locator: '/System/Library/Keychains/SystemRootCertificates.keychain',
+            pems: [publicRootPem, localRootPem, otherLocalRootPem],
+          }),
+          osStore({
+            kind: 'macos-admin-anchors',
+            locator: '/Library/Keychains/System.keychain',
+            pems: [localRootPem],
+          }),
+        ],
+      }),
+    );
+
+    const reads = findings.filter((finding) => finding.id === 'truststore.os.read');
+    expect(reads.map((read) => evidence(read, 'anchors'))).toEqual([['3'], ['1']]);
+    expect(reads.map((read) => evidence(read, 'locally added'))).toEqual([['2'], ['1']]);
+  });
+
+  it('counts the blocks in a store it could not parse instead of dropping them in silence', () => {
+    const findings = crossCheck(
+      input({ osStores: [osStore({ pems: [publicRootPem, localRootPem, UNPARSABLE_PEM] })] }),
+    );
+
+    const read = byId(findings, 'truststore.os.read');
+    expect(evidence(read, 'anchors')).toEqual(['2']);
+    expect(evidence(read, 'unparsable certificates')).toEqual(['1']);
+  });
+
+  it('says nothing was parsed rather than reporting a clean store of zero anchors', () => {
+    const findings = crossCheck(input({ osStores: [osStore({ pems: [UNPARSABLE_PEM, OTHER_UNPARSABLE_PEM] })] }));
+
+    const read = byId(findings, 'truststore.os.read');
+    expect(evidence(read, 'anchors')).toEqual(['0']);
+    expect(evidence(read, 'unparsable certificates')).toEqual(['2']);
+  });
+
+  it('leaves the count off a store every block of which parsed', () => {
+    expect(evidence(byId(crossCheck(input()), 'truststore.os.read'), 'unparsable certificates')).toEqual([]);
+  });
+
+  /**
+   * `partial` is `failure: null` with half the bags unread, so nothing else in
+   * the pipeline flags it: an `ok` verdict here would be green over anchors
+   * portcall never saw.
+   */
+  it('emits no clean verdict over a keystore only part of which could be read', () => {
+    const findings = crossCheck(
+      input({
+        runtimes: ['java'],
+        runtimeStores: [
+          runtimeStore('java', {
+            kind: 'java-cacerts',
+            combines: 'standalone',
+            locator: '/opt/jdk-17/lib/security/cacerts',
+            format: 'pkcs12',
+            pems: [publicRootPem, localRootPem],
+            partial: true,
+          }),
+        ],
+      }),
+    );
+
+    expect(verdict(findings)).toEqual(['truststore.os.read=ok', 'truststore.java.store-unreadable=unknown']);
+    expect(findings.map((finding) => finding.id)).not.toContain('truststore.java.roots-present');
+    const unreadable = byId(findings, 'truststore.java.store-unreadable');
+    expect(evidence(unreadable, 'failure')).toEqual(['encrypted-entries']);
+    expect(unreadable.remediation).toContain('never supplies a keystore password');
+  });
+
+  it('marks a missing-root built from a partly read keystore as built on a partial read', () => {
+    const findings = crossCheck(
+      input({
+        runtimes: ['java'],
+        runtimeStores: [
+          runtimeStore('java', {
+            kind: 'java-cacerts',
+            combines: 'standalone',
+            locator: '/opt/jdk-17/lib/security/cacerts',
+            format: 'pkcs12',
+            pems: [publicRootPem],
+            partial: true,
+          }),
+        ],
+      }),
+    );
+
+    expect(verdict(findings)).toEqual([
+      'truststore.os.read=ok',
+      'truststore.java.store-unreadable=unknown',
+      'truststore.java.missing-root=degraded',
+    ]);
+    expect(evidence(byId(findings, 'truststore.java.missing-root'), 'runtime store read')).toEqual(['partial']);
   });
 });
 

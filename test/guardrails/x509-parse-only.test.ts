@@ -114,6 +114,11 @@ describe('x509 parse-only guardrail', () => {
     // The moved index. Named because `probes/shared/` is skipped when absent,
     // and a skipped directory makes the node: ban below vacuous for it.
     expect(scanned).toContain('probes/shared/root-index.ts');
+    // The trust-store cross-check. `probes/truststore/` was listed in
+    // PURE_PROBE_DIRS before it existed, and a directory that does not exist is
+    // skipped rather than failing - so until a real file inside it is named
+    // here, a rename or a move re-opens the ban in silence.
+    expect(scanned).toContain('probes/truststore/evaluate.ts');
   });
 
   it('no module in src/ calls an x509 trust or verification API', async () => {

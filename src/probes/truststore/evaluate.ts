@@ -160,29 +160,44 @@ function derKey(der: Uint8Array): string {
   return btoa(binary);
 }
 
-/**
- * Parse a store's PEMs into anchors, deduplicated by DER.
- *
- * A block that does not parse is skipped rather than reported: the readers
- * already drop everything that is not a base64 `CERTIFICATE` block, so what
- * arrives here and still fails to parse is a malformed certificate in the
- * customer's own store, and the honest thing to do about it is not to count it
- * as an anchor. Throwing would take the whole report down over one bad block.
- */
-function anchorsOf(pems: readonly string[], into: Map<string, Anchor> = new Map()): Map<string, Anchor> {
+/** One store's anchors, and what it held that never became one. */
+interface StoreAnchors {
+  anchors: Map<string, Anchor>;
+  /**
+   * Blocks that did not parse. The readers already drop everything that is not
+   * a base64 `CERTIFICATE` block, so what arrives here and still fails is a
+   * malformed certificate in the customer's own store - and throwing over it
+   * would take the whole report down.
+   *
+   * It is *counted* rather than merely skipped because the skip is load-bearing
+   * in the wrong direction: an anchor that fails to parse leaves `locallyAdded`
+   * silently, and if it was the one a runtime lacks, that runtime gets a clean
+   * `roots-present`. In the limit an entirely unparsable store reads as
+   * "0 anchors, nothing missing" - a clean bill for every runtime on the
+   * machine. The count rides on `truststore.os.read` so the number an operator
+   * reads there is the number portcall actually cross-checked.
+   */
+  unparsed: number;
+}
+
+/** Parse one store's PEMs into anchors, deduplicated by DER. */
+function anchorsOf(pems: readonly string[]): StoreAnchors {
+  const anchors = new Map<string, Anchor>();
+  let unparsed = 0;
   for (const pem of pems) {
     let certificate: X509Certificate;
     try {
       certificate = new X509Certificate(pem);
     } catch {
+      unparsed += 1;
       continue;
     }
     const der = new Uint8Array(certificate.rawData);
     const key = derKey(der);
-    if (into.has(key)) continue;
-    into.set(key, { der, subject: certificate.subject, canonicalSubject: canonicalDn(certificate.subjectName) });
+    if (anchors.has(key)) continue;
+    anchors.set(key, { der, subject: certificate.subject, canonicalSubject: canonicalDn(certificate.subjectName) });
   }
-  return into;
+  return { anchors, unparsed };
 }
 
 /** Deterministic order for everything the report prints: by canonical subject. */
@@ -315,16 +330,27 @@ function unreadableFinding(evidence: Evidence[], unsupportedPlatform: boolean): 
   };
 }
 
-/** Findings about the stores themselves, before anything is cross-checked against them. */
+/**
+ * Findings about the stores themselves, before anything is cross-checked
+ * against them.
+ *
+ * `locallyAddedKeys` is the run-wide set, but the count printed here is this
+ * store's share of it: the finding is per store, so a run-wide total under a
+ * keychain holding one anchor prints a subset larger than the set it sits
+ * inside.
+ */
 function osFindings(
   input: CrossCheckInput,
-  anchorsPerStore: Map<TrustStoreOutcome, Anchor[]>,
-  locallyAdded: number,
+  anchorsPerStore: Map<TrustStoreOutcome, StoreAnchors>,
+  locallyAddedKeys: ReadonlySet<string>,
 ): Finding[] {
   const findings: Finding[] = [];
 
   for (const store of input.osStores) {
     if (store.failure === null) {
+      const parsed = anchorsPerStore.get(store);
+      const anchors = parsed === undefined ? [] : [...parsed.anchors.values()];
+      const locallyAdded = anchors.filter((anchor) => locallyAddedKeys.has(derKey(anchor.der))).length;
       findings.push({
         id: 'truststore.os.read',
         probe: PROBE,
@@ -333,8 +359,14 @@ function osFindings(
         evidence: [
           { label: 'store', value: store.kind, kind: 'text' },
           { label: 'store read', value: store.locator, kind: 'path' },
-          { label: 'anchors', value: String((anchorsPerStore.get(store) ?? []).length), kind: 'number' },
+          { label: 'anchors', value: String(anchors.length), kind: 'number' },
           { label: 'locally added', value: String(locallyAdded), kind: 'number' },
+          // Only when there were any: a zero on every clean read is noise, and
+          // a non-zero one is the difference between "this store holds two
+          // anchors" and "this store holds two portcall could read".
+          ...(parsed !== undefined && parsed.unparsed > 0
+            ? [{ label: 'unparsable certificates', value: String(parsed.unparsed), kind: 'number' as const }]
+            : []),
         ],
       });
       continue;
@@ -409,6 +441,14 @@ interface TrustSet {
   /** The store this set is, where it has a single one. Null for a bundle or a union. */
   locator: string | null;
   pems: readonly string[];
+  /**
+   * True when a store this set was built from was read only in part - a
+   * keystore some of whose bags are password-protected (`RuntimeStoreOutcome.partial`).
+   * The set is then a subset of what the runtime actually consults, which is
+   * enough to say a root is missing from what was read and never enough to say
+   * every root is present.
+   */
+  partial: boolean;
 }
 
 /**
@@ -424,10 +464,17 @@ interface TrustSet {
  */
 function trustSets(runtime: Runtime, outcomes: readonly RuntimeStoreOutcome[]): TrustSet[] {
   const readable = outcomes.filter((outcome) => outcome.failure === null && outcome.kind !== 'platform-verifier');
-  const additions = readable.filter((outcome) => outcome.combines === 'adds-to').flatMap((outcome) => outcome.pems);
+  const additions = readable.filter((outcome) => outcome.combines === 'adds-to');
+  const additionPems = additions.flatMap((outcome) => outcome.pems);
+  const additionsPartial = additions.some((outcome) => outcome.partial);
   const replacing = readable.filter((outcome) => outcome.combines === 'replaces');
   const bases = replacing.length > 0 ? replacing : readable.filter((outcome) => outcome.combines === 'standalone');
-  return bases.map((base) => ({ runtime, locator: base.locator, pems: [...base.pems, ...additions] }));
+  return bases.map((base) => ({
+    runtime,
+    locator: base.locator,
+    pems: [...base.pems, ...additionPems],
+    partial: base.partial || additionsPartial,
+  }));
 }
 
 // --- correlation -----------------------------------------------------------
@@ -451,9 +498,18 @@ function correlate(missing: readonly Anchor[], observed: readonly ObservedAnchor
   for (const anchor of observed) {
     if (anchor.der !== null && keys.has(derKey(anchor.der))) return { anchor, match: 'bytes' };
   }
+  // The name-only pass keys on `private`, and only it. `indeterminate` is the
+  // `tls` probe saying it could not tell a private anchor from a public one -
+  // routinely a public root re-issued under the same subject DN, which a
+  // machine trusts and a runtime's older bundled snapshot does not - so a DN
+  // that merely matches a maybe is not evidence that this chain is the one
+  // failing, and must not carry a missing root up to `blocker`. The byte pass
+  // above needs no such filter: byte identity is proof whatever it was graded.
   const subjects = new Set(missing.map((anchor) => anchor.canonicalSubject));
   for (const anchor of observed) {
-    if (subjects.has(anchor.canonicalIssuer)) return { anchor, match: 'issuer-name' };
+    if (anchor.anchorClass === 'private' && subjects.has(anchor.canonicalIssuer)) {
+      return { anchor, match: 'issuer-name' };
+    }
   }
   return null;
 }
@@ -515,6 +571,10 @@ function missingRootFinding(set: TrustSet, missing: readonly Anchor[], correlati
     evidence.push({ label: 'anchor', value: anchor.subject, kind: 'dn' });
   }
   if (set.locator !== null) evidence.push({ label: 'runtime store', value: set.locator, kind: 'path' });
+  // Narrows the claim to what was read: these anchors are missing from the part
+  // of the store portcall could open, and the store's own finding beside this
+  // one says which part that was.
+  if (set.partial) evidence.push({ label: 'runtime store read', value: 'partial', kind: 'text' });
   if (correlation !== null) {
     evidence.push({ label: 'host', value: correlation.anchor.host, kind: 'hostname' });
     evidence.push({ label: 'connection', value: correlation.anchor.via, kind: 'text' });
@@ -638,31 +698,50 @@ function storeNotFoundFinding(runtime: Runtime, searched: readonly string[]): Fi
   };
 }
 
+/**
+ * A keystore that produced no usable set, or only part of one.
+ *
+ * The partial branch is the same fact as `encrypted`, one bag at a time: some
+ * entries came back and others are password-protected. It arrives with
+ * `failure: null`, so without this branch it would say nothing at all while
+ * the readable half went on to be graded as if it were the whole store.
+ */
 function javaStoreUnreadableFinding(outcome: RuntimeStoreOutcome): Finding {
   const encrypted = outcome.failure === 'encrypted';
+  const partial = outcome.failure === null && outcome.partial;
   return {
     id: 'truststore.java.store-unreadable',
     probe: PROBE,
     severity: 'unknown',
-    title: encrypted
-      ? 'This JDK’s keystore is password-protected, and portcall supplies no password'
-      : 'This JDK’s keystore was found and could not be read',
+    title: partial
+      ? 'Only part of this JDK’s keystore could be read: some entries are password-protected'
+      : encrypted
+        ? 'This JDK’s keystore is password-protected, and portcall supplies no password'
+        : 'This JDK’s keystore was found and could not be read',
     evidence: [
       ...(outcome.locator === null ? [] : [{ label: 'runtime store', value: outcome.locator, kind: 'path' as const }]),
       { label: 'format', value: outcome.format ?? NO_CODE, kind: 'text' },
-      { label: 'failure', value: outcome.failure ?? 'no-certificates', kind: 'text' },
+      { label: 'failure', value: outcome.failure ?? (partial ? 'encrypted-entries' : 'no-certificates'), kind: 'text' },
+      ...(partial ? [{ label: 'anchors read', value: String(outcome.pems.length), kind: 'number' as const }] : []),
     ],
-    remediation: encrypted
-      ? 'This cacerts is a PKCS#12 keystore whose certificate entries are password-protected. ' +
-        'Portcall never supplies a keystore password (SPEC.md §4.2, ADR-0036), so it cannot ' +
-        'list them. Run `keytool -list -keystore <path>` yourself against the store named above ' +
-        'and compare the output against the anchors listed in this report.'
-      : 'Portcall found this JDK’s keystore and could not read it - the failure class above ' +
-        'says whether the container was a format it does not parse, the file was truncated, or ' +
-        'the read itself failed. No missing-root verdict was produced for this store, because an ' +
-        'unreadable store must manufacture neither a clean answer nor a dirty one. Run `keytool ' +
-        '-list -keystore <path>` against the path above and compare it against the anchors in ' +
-        'this report.',
+    remediation: partial
+      ? 'Portcall read the certificate entries this keystore does not protect with a password and ' +
+        'could not read the rest, because it never supplies a keystore password (SPEC.md §4.2, ' +
+        'ADR-0036). The cross-check below therefore covers only the entries it could open, and no ' +
+        'clean verdict was produced for this store: the anchors it could not read may well be the ' +
+        'ones you are looking for. Run `keytool -list -keystore <path>` yourself against the store ' +
+        'named above and compare the full listing against the anchors in this report.'
+      : encrypted
+        ? 'This cacerts is a PKCS#12 keystore whose certificate entries are password-protected. ' +
+          'Portcall never supplies a keystore password (SPEC.md §4.2, ADR-0036), so it cannot ' +
+          'list them. Run `keytool -list -keystore <path>` yourself against the store named above ' +
+          'and compare the output against the anchors listed in this report.'
+        : 'Portcall found this JDK’s keystore and could not read it - the failure class above ' +
+          'says whether the container was a format it does not parse, the file was truncated, or ' +
+          'the read itself failed. No missing-root verdict was produced for this store, because an ' +
+          'unreadable store must manufacture neither a clean answer nor a dirty one. Run `keytool ' +
+          '-list -keystore <path>` against the path above and compare it against the anchors in ' +
+          'this report.',
   };
 }
 
@@ -683,7 +762,10 @@ function runtimeFindings(
 
   for (const outcome of outcomes) {
     if (ENV_STORE_KINDS.has(outcome.kind)) findings.push(...extraCaFindings(runtime, outcome));
-    if (outcome.kind === 'java-cacerts' && outcome.failure !== null && outcome.failure !== 'not-found') {
+    if (
+      outcome.kind === 'java-cacerts' &&
+      (outcome.partial || (outcome.failure !== null && outcome.failure !== 'not-found'))
+    ) {
       findings.push(javaStoreUnreadableFinding(outcome));
     }
   }
@@ -725,11 +807,16 @@ function runtimeFindings(
   for (const set of sets) {
     const index = certificateIndex([...set.pems]);
     const missing = locallyAdded.filter((anchor) => !index.hasCertificate(anchor.der));
-    findings.push(
-      missing.length === 0
-        ? rootsPresentFinding(set, level, read, unread)
-        : missingRootFinding(set, missing, correlate(missing, input.observedAnchors)),
-    );
+    if (missing.length > 0) {
+      findings.push(missingRootFinding(set, missing, correlate(missing, input.observedAnchors)));
+      continue;
+    }
+    // The same suppression `level === 'none'` performs above, one store down:
+    // "this runtime trusts every root this machine adds" is a claim about the
+    // whole set, and a set assembled from a store read in part is not the whole
+    // set. The unread entries could hold anything, so the honest answer is the
+    // store's own `store-unreadable` finding and no verdict here.
+    if (!set.partial) findings.push(rootsPresentFinding(set, level, read, unread));
   }
   return findings;
 }
@@ -745,12 +832,15 @@ export function crossCheck(input: CrossCheckInput): Finding[] {
 
   // Deduplicated across stores, so macOS's two keychains holding the same root
   // count it once, and sorted, so the report is identical for identical input.
-  const anchorsPerStore = new Map<TrustStoreOutcome, Anchor[]>();
+  const anchorsPerStore = new Map<TrustStoreOutcome, StoreAnchors>();
   const all = new Map<string, Anchor>();
   for (const store of input.osStores) {
     if (store.failure !== null) continue;
-    anchorsPerStore.set(store, [...anchorsOf(store.pems).values()]);
-    anchorsOf(store.pems, all);
+    const parsed = anchorsOf(store.pems);
+    anchorsPerStore.set(store, parsed);
+    for (const [key, anchor] of parsed.anchors) {
+      if (!all.has(key)) all.set(key, anchor);
+    }
   }
 
   // Named factually and never "corporate": a public root merely newer than the
@@ -760,7 +850,7 @@ export function crossCheck(input: CrossCheckInput): Finding[] {
     .sort(byCanonicalSubject);
 
   const level = osEvidenceLevel(input.osStores);
-  const findings = osFindings(input, anchorsPerStore, locallyAdded.length);
+  const findings = osFindings(input, anchorsPerStore, new Set(locallyAdded.map((anchor) => derKey(anchor.der))));
 
   for (const runtime of input.runtimes) {
     const outcomes = input.runtimeStores.filter((outcome) => outcome.runtime === runtime);
