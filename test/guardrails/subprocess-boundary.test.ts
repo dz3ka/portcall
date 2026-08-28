@@ -158,7 +158,25 @@ describe('subprocess boundary guardrail', () => {
 
   it('runs exactly this table of commands, argument for argument', () => {
     expect(OS_TRUSTSTORE_COMMANDS).toEqual(EXPECTED_COMMANDS);
-    expect(LINUX_CA_BUNDLE_PATHS).toEqual(['/etc/ssl/certs/ca-certificates.crt', '/etc/pki/tls/certs/ca-bundle.crt']);
+    expect(LINUX_CA_BUNDLE_PATHS).toEqual([
+      '/etc/ssl/certs/ca-certificates.crt',
+      '/etc/pki/tls/certs/ca-bundle.crt',
+      '/etc/ssl/ca-bundle.pem',
+      '/etc/pki/tls/cacert.pem',
+      '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem',
+      '/etc/ssl/cert.pem',
+    ]);
+  });
+
+  it('pins every bundle path as a frozen absolute POSIX path', () => {
+    // The rows are read as files, never resolved against anything, so a
+    // relative row would resolve against the working directory - and the
+    // freeze is what a `readonly` type does not do at run time.
+    expect(Object.isFrozen(LINUX_CA_BUNDLE_PATHS)).toBe(true);
+    for (const path of LINUX_CA_BUNDLE_PATHS) {
+      expect(typeof path, 'every bundle path must be a string literal').toBe('string');
+      expect(path, `${path} must be an absolute POSIX path`).toMatch(/^\//);
+    }
   });
 
   it('names an absolute file for every command, never a name PATH would resolve', () => {

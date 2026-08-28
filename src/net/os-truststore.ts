@@ -92,8 +92,34 @@ const COMMAND_TABLE: readonly TrustStoreCommand[] = [
   },
 ];
 
-/** Read directly, no subprocess. Linux only. First path that exists wins. */
-const LINUX_PATHS: readonly string[] = ['/etc/ssl/certs/ca-certificates.crt', '/etc/pki/tls/certs/ca-bundle.crt'];
+/**
+ * Read directly, no subprocess. Linux only. First path that exists wins.
+ *
+ * The set, and the order, is Go's `crypto/x509` `certFiles`; that is the whole
+ * warrant for it, and no row here claims to be any one system's bundle. Two
+ * rows was too few: a machine with neither present read as `reader-missing`
+ * against a locator naming a file that had never been there, and the probe
+ * suppressed every runtime verdict on that machine rather than report one.
+ *
+ * Borrowing Go's set is sound *conditionally*. It holds because this one table
+ * is the whole of what the OS reference reads on Linux, which makes that
+ * reference byte-identical to the set Go itself reads there: same files, same
+ * order, so a root Go trusts is a root the reference has and the cross-check
+ * of the two cannot go wrong. That equality is the whole of the argument. If
+ * the OS reader ever also reads `/etc/ssl/certs/` as a directory,
+ * the reference gains roots no file listed here carries, Go is then measured
+ * against a superset of its own trust, and a false `missing-root` becomes
+ * reachable. An OS-side certificate-*directory* read must therefore extend
+ * Go's set in the same commit that adds it.
+ */
+const LINUX_PATHS: readonly string[] = [
+  '/etc/ssl/certs/ca-certificates.crt',
+  '/etc/pki/tls/certs/ca-bundle.crt',
+  '/etc/ssl/ca-bundle.pem',
+  '/etc/pki/tls/cacert.pem',
+  '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem',
+  '/etc/ssl/cert.pem',
+];
 // --- END PINNED COMMAND TABLE ---
 
 /** Frozen element by element: a `readonly` type disappears at run time, this does not. */

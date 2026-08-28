@@ -346,6 +346,16 @@ describe('linux ca bundle read', () => {
     expect(outcome.code).toBe('ENOENT');
   });
 
+  it('yields reader-missing for an empty candidate list, naming a path it did look for', async () => {
+    // Not reachable through `read()`, which always passes the pinned table -
+    // pinned here so that a caller that narrows the list to nothing still gets
+    // an outcome with a locator, rather than `undefined` in a finding.
+    const outcome = await readLinuxCaBundle([], MAX_STORE_OUTPUT_BYTES);
+    expect(outcome.failure).toBe('reader-missing');
+    expect(outcome.code).toBe('ENOENT');
+    expect(LINUX_CA_BUNDLE_PATHS).toContain(outcome.locator);
+  });
+
   it('yields output-too-large rather than reading a bundle past the cap', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'portcall-truststore-'));
     try {
