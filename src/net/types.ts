@@ -1,3 +1,4 @@
+import type { Runtime } from '../profiles/schema.ts';
 import type { NetworkGuard } from './guard.ts';
 
 /**
@@ -181,4 +182,112 @@ export interface TlsCaptureOptions {
 
 export interface TlsCapture {
   capture(target: TlsCaptureTarget, options: TlsCaptureOptions): Promise<TlsChainOutcome>;
+}
+
+/**
+ * The trust-store seam (M4, ADR-0032/ADR-0033/ADR-0036). Two readers, one
+ * shape: the platform's own store, and the store each *runtime* consults. Both
+ * follow ADR-0008 - data comes out, an `Error` never does - because "there is
+ * no `security` binary in this container" and "this JDK's cacerts is
+ * password-protected" are ordinary answers a report has to carry, not
+ * exceptional control flow.
+ *
+ * Everything here is types only, so the probe can import it without tripping
+ * the `node:` import scans; the implementations live in `os-truststore.ts` and
+ * `runtime-stores.ts`, which are the only files that touch a process or a file.
+ */
+
+/** Which store was read, as our own closed vocabulary. Reported as `text` evidence. */
+export type TrustStoreKind =
+  | 'macos-system-roots' // /System/Library/Keychains/SystemRootCertificates.keychain
+  | 'macos-admin-anchors' // /Library/Keychains/System.keychain - MDM/admin installs land here
+  | 'windows-machine-root' // the LocalMachine Root store
+  | 'linux-ca-bundle'; // /etc/ssl/certs/ca-certificates.crt or /etc/pki/tls/certs/ca-bundle.crt
+
+/** Why a store read produced nothing. Closed class: these are different tickets (CLAUDE.md). */
+export type TrustStoreFailure =
+  | 'unsupported-platform' // not darwin/win32/linux
+  | 'reader-missing' // the absolute-path binary or the file does not exist
+  | 'reader-failed' // non-zero exit, or killed by a signal
+  | 'timeout' // exceeded SUBPROCESS_TIMEOUT_MS; the child was killed
+  | 'output-too-large' // exceeded MAX_STORE_OUTPUT_BYTES; the child was killed
+  | 'no-certificates'; // ran cleanly, parsed nothing
+
+/** One store's read. `pems` is empty exactly when `failure` is non-null. */
+export interface TrustStoreOutcome {
+  kind: TrustStoreKind;
+  /** Absolute path invoked or read. Emitted as `path` evidence, so redaction hashes it. */
+  locator: string;
+  pems: readonly string[];
+  failure: TrustStoreFailure | null;
+  /** Machine code only - exit:1, signal:SIGKILL, ENOENT. Never the child's stderr (ADR-0009). */
+  code: string | null;
+}
+
+export interface OsTrustStoreReader {
+  /** Every store this platform has. Never throws; a failure is an outcome. */
+  read(options: { signal: AbortSignal; timeoutMs: number }): Promise<readonly TrustStoreOutcome[]>;
+}
+
+/**
+ * One row of the pinned command table (ADR-0033). Lives here rather than in
+ * `os-truststore.ts` so the probe and the guardrail can name the type without
+ * importing the module that spawns processes.
+ */
+export interface TrustStoreCommand {
+  platform: NodeJS.Platform;
+  kind: TrustStoreKind;
+  /** Absolute path. Never resolved through PATH (ADR-0033). */
+  file: string;
+  /** String literals only: no interpolation, no concatenation. Pinned by the guardrail. */
+  argv: readonly string[];
+  /** How stdout becomes PEMs. */
+  format: 'pem-stream' | 'base64-der-lines';
+}
+
+/** Where a runtime looks for roots. One value per store, not per runtime. */
+export type RuntimeStoreKind =
+  | 'node-bundled' // tls.rootCertificates, via net/root-bundle.ts
+  | 'node-extra-ca' // NODE_EXTRA_CA_CERTS - Node *adds* these to the bundle
+  | 'go-ssl-cert-file' // SSL_CERT_FILE   - replaces the set
+  | 'go-ssl-cert-dir' // SSL_CERT_DIR    - replaces the set
+  | 'python-certifi' // site-packages/certifi/cacert.pem, found by path
+  | 'python-ssl-cert-file' // SSL_CERT_FILE
+  | 'python-requests-ca-bundle' // REQUESTS_CA_BUNDLE - replaces certifi for `requests`
+  | 'java-cacerts' // JAVA_HOME lib/security/cacerts and the well-known JDK paths
+  | 'platform-verifier'; // this runtime asks the OS here (D9). `pems` is empty.
+
+export type RuntimeStoreFailure =
+  | 'not-configured' // the env var this kind names is unset - not an error
+  | 'not-found' // the well-known paths were searched and nothing was there
+  | 'unreadable' // exists, open/read failed. `code` carries the errno
+  | 'output-too-large' // exceeded MAX_RUNTIME_STORE_BYTES
+  | 'unsupported-format' // a keystore whose magic is neither JKS nor PKCS#12 (D8)
+  | 'unsupported-encoding' // indefinite-length BER inside a PKCS#12 keystore (D8)
+  | 'truncated' // a length field runs past the end of the file
+  | 'encrypted' // cert bags are password-protected; portcall supplies none (D8)
+  | 'no-certificates'; // parsed cleanly, nothing in it
+
+export interface RuntimeStoreOutcome {
+  runtime: Runtime; // from profiles/schema.ts
+  kind: RuntimeStoreKind;
+  /** Path or env-var name. `path` evidence. Null for `node-bundled` and `platform-verifier`. */
+  locator: string | null;
+  /** How this store combines with its siblings for the same runtime. See `trustSets`. */
+  combines: 'adds-to' | 'replaces' | 'standalone';
+  pems: readonly string[];
+  /** Keystores only: which container was actually found. Recorded as evidence. */
+  format: 'jks' | 'pkcs12' | null;
+  /** True when some bags were read and others were encrypted. The finding says so. */
+  partial: boolean;
+  failure: RuntimeStoreFailure | null;
+  /** Machine code only - ENOENT, EACCES. Never a message. */
+  code: string | null;
+}
+
+export interface RuntimeStoreReader {
+  read(
+    runtimes: readonly Runtime[],
+    options: { env: NodeJS.ProcessEnv; platform: NodeJS.Platform; maxBytes: number },
+  ): Promise<readonly RuntimeStoreOutcome[]>;
 }

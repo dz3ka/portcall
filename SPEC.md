@@ -59,8 +59,15 @@ in CI, and stated at the top of the README.
 
 1. **Read-only.** No writes outside the working directory. No configuration changes, no
    installs, no registry or keychain writes.
-2. **No credentials.** It never reads keychains, tokens, private keys, or browser profiles,
-   and never prompts for a password.
+2. **No credentials.** It never reads private keys, passwords, tokens, browser profiles, or
+   personal credential stores — the macOS login keychain, the Windows CurrentUser and `My`
+   stores, SSH keys — never prompts for a password, and never supplies one, including the
+   documented default password of a Java keystore. It *does* enumerate the machine's **public
+   trust anchors**, because "which roots does this machine trust" is the question the
+   `truststore` probe exists to answer; it does so by invoking the platform's own certificate
+   listing command at a fixed absolute path, from a pinned argument list, so the read is visible
+   in any process trace (ADR-0032, ADR-0033), and by reading runtime trust stores as files
+   (ADR-0036).
 3. **No telemetry, ever.** Nothing leaves the machine. The operator sends the report or
    nobody does.
 4. **Redacted by default.** Internal hostnames, usernames, IPs and serial numbers are hashed
