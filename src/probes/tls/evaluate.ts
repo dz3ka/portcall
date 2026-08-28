@@ -1,7 +1,13 @@
 import { SubjectAlternativeNameExtension, X509Certificate } from '@peculiar/x509';
 import type { Evidence, Finding } from '../../model/finding.ts';
 import type { Profile } from '../../profiles/schema.ts';
+// Type-only, so it is erased: `verbatimModuleSyntax` is on and eslint's
+// `consistent-type-imports` is an error, so this cannot silently become a value
+// import and drag `engine/` - which imports `node:process` - into a module that
+// `test/guardrails/x509-parse-only.test.ts` requires to stay pure.
+import type { ObservedAnchor } from '../../engine/index.ts';
 import type { CertificateIndex } from '../shared/root-index.ts';
+import { canonicalDn } from '../shared/root-index.ts';
 import { cap } from '../shared/severity.ts';
 import { classifyRoot } from './public-roots.ts';
 import type { RootVerdict } from './public-roots.ts';
@@ -78,6 +84,24 @@ export interface ChainEvaluationOptions {
   roots: CertificateIndex;
   /** Evaluation time. Injected so expiry is a function of its inputs and not of the day the suite runs. */
   now: Date;
+}
+
+/**
+ * What one chain evaluated to: the findings, plus the anchor the `truststore`
+ * probe cross-checks against the platform's trust stores (ADR-0034).
+ *
+ * The anchor is *returned* rather than pushed from in here, so this module
+ * keeps touching nothing but its arguments; the single mutation happens at the
+ * I/O edge in `index.ts`, which is where this repo puts them.
+ */
+export interface ChainEvaluation {
+  findings: Finding[];
+  /**
+   * The anchor this chain terminated in, when it is not a bundled public root.
+   * Null for a `public` verdict, an empty chain and an unparseable chain - in
+   * none of those is there anything for the cross-check to correlate.
+   */
+  anchor: ObservedAnchor | null;
 }
 
 /** Protocol names ranked by strength. Anything outside this table is a name we will not repeat. */
@@ -579,15 +603,17 @@ export function evaluateChain(
   target: ChainTarget,
   profile: Pick<Profile, 'tls'>,
   options: ChainEvaluationOptions,
-): Finding[] {
-  if (capture.chainDer.length === 0) return [chainEmpty(target, capture)];
+): ChainEvaluation {
+  if (capture.chainDer.length === 0) return { findings: [chainEmpty(target, capture)], anchor: null };
 
   const chain = parseChain(capture.chainDer);
-  if (chain === null) return [chainUnparseable(target, capture, capture.chainDer.length)];
+  if (chain === null) {
+    return { findings: [chainUnparseable(target, capture, capture.chainDer.length)], anchor: null };
+  }
 
   const leaf = chain[0];
   /* c8 ignore next */
-  if (leaf === undefined) return [chainEmpty(target, capture)];
+  if (leaf === undefined) return { findings: [chainEmpty(target, capture)], anchor: null };
 
   const verdict = classifyRoot(chain, options.roots);
   const findings: Finding[] = [];
@@ -613,7 +639,48 @@ export function evaluateChain(
   findings.push(...validityFindings(target, capture, chain, options.now));
   findings.push(...nameFindings(target, capture, leaf));
 
-  return findings;
+  return { findings, anchor: observedAnchor(chain, verdict, target, capture) };
+}
+
+/**
+ * The anchor to hand the cross-check, derived from the verdict that was just
+ * made rather than re-derived later (ADR-0034): two independent answers to
+ * "what is the anchor" could disagree after an edit to `issuancePath`, and the
+ * disagreement would be invisible - the findings would say one thing and the
+ * blocker correlation another.
+ *
+ * The terminus is the last certificate on the *issuance path*, which is the one
+ * `classifyRoot` reasoned over, not the last element of the presented array -
+ * off-path padding is not this chain's anchor.
+ *
+ * `der` is present only for `self-signed-anchor-not-bundled`, the one reason
+ * under which the peer presented the anchor itself. Everywhere else the anchor
+ * was named and never sent, so the DN is the only identity there is, and
+ * claiming otherwise would let the cross-check correlate by bytes it invented.
+ */
+function observedAnchor(
+  chain: readonly X509Certificate[],
+  verdict: RootVerdict,
+  target: ChainTarget,
+  capture: CapturedChain,
+): ObservedAnchor | null {
+  if (verdict.class === 'public') return null;
+
+  const terminusIndex = verdict.path.at(-1);
+  const terminus = terminusIndex === undefined ? undefined : chain[terminusIndex];
+  // `path` is never empty and always indexes the chain it came from; the guard
+  // is for the compiler, not for a case that can happen.
+  /* c8 ignore next */
+  if (terminus === undefined) return null;
+
+  return {
+    der: verdict.reason === 'self-signed-anchor-not-bundled' ? new Uint8Array(terminus.rawData) : null,
+    canonicalIssuer: canonicalDn(terminus.issuerName),
+    canonicalSubject: canonicalDn(terminus.subjectName),
+    host: target.host,
+    via: capture.via,
+    anchorClass: verdict.class,
+  };
 }
 
 function interceptionEvidence(label: string, capture: CapturedChain): Evidence[] {

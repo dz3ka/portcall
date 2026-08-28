@@ -218,6 +218,7 @@ function context(profile: LoadedProfile): ProbeContext {
     net: new NetworkGuard(profile.profile),
     deadline: Date.now() + 60_000,
     signal: new AbortController().signal,
+    observedAnchors: [],
   };
 }
 
@@ -346,7 +347,7 @@ async function tlsFindings(): Promise<Finding[]> {
           { host: 'api.example.com', required: true },
           { tls: { min_version: '1.2', interception_tolerated } },
           { roots, now },
-        ),
+        ).findings,
       ),
     ),
   );

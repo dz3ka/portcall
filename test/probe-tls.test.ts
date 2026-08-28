@@ -3,10 +3,11 @@ import type { ProbeContext } from '../src/engine/index.ts';
 import { assertRemediable } from '../src/model/finding.ts';
 import type { Finding } from '../src/model/finding.ts';
 import { NetworkGuard } from '../src/net/guard.ts';
+import { PUBLIC_ROOT_CA_PEMS } from '../src/net/root-bundle.ts';
 import type { TlsCapture, TlsCaptureTarget, TlsChainOutcome } from '../src/net/types.ts';
 import type { Endpoint, LoadedProfile, Profile } from '../src/profiles/schema.ts';
 import { runTls, tlsProbe } from '../src/probes/tls/index.ts';
-import { syntheticChain } from './helpers/synthetic-chain.ts';
+import { derOfPem, subjectOfPem, syntheticChain } from './helpers/synthetic-chain.ts';
 
 /**
  * The `tls` probe *shell* — the I/O edge, not the evaluation.
@@ -42,6 +43,7 @@ function context(profile: LoadedProfile): ProbeContext {
     net: new NetworkGuard(profile.profile),
     deadline: Date.now() + 60_000,
     signal: new AbortController().signal,
+    observedAnchors: [],
   };
 }
 
@@ -395,5 +397,62 @@ describe('tls probe shell, on the leg that goes through a proxy', () => {
     expect(withId(findings, 'tls.capture-failed-connect').remediation).toMatch(
       /The egress probe reports the same failure with the layer that stopped it/,
     );
+  });
+});
+
+/**
+ * The anchor observation seam at the edge (D3, ADR-0034). The shell is where
+ * `evaluateChain`'s returned anchor becomes a push into the run-scoped array
+ * the `truststore` probe reads, so this is where "one observation per path"
+ * can be asserted at all - `test/tls-evaluate.test.ts` owns what an anchor
+ * *contains*.
+ */
+describe('tls probe anchor observation', () => {
+  /** A chain under a root the runtime ships, so the evaluation has nothing to observe. */
+  async function publicOutcome(): Promise<Extract<TlsChainOutcome, { ok: true }>> {
+    const rootPem = PUBLIC_ROOT_CA_PEMS[0] ?? '';
+    const leaf = await syntheticChain([
+      { subject: 'CN=api.example.com', issuer: subjectOfPem(rootPem), dnsNames: ['api.example.com'] },
+    ]);
+    const direct = await capturedChain();
+    return { ...direct, chainDer: [...leaf, derOfPem(rootPem)] };
+  }
+
+  it('records exactly one anchor for a privately rooted chain on a single path', async () => {
+    const probeContext = context(loaded([endpoint()]));
+    await runTls(probeContext, capturerStub(await capturedChain()), {}, NOW);
+
+    expect(probeContext.observedAnchors).toHaveLength(1);
+    expect(probeContext.observedAnchors[0]?.anchorClass).toBe('private');
+    expect(probeContext.observedAnchors[0]?.via).toBe('direct');
+    expect(probeContext.observedAnchors[0]?.host).toBe('api.example.com');
+  });
+
+  it('records nothing for a chain anchored in a root the runtime already ships', async () => {
+    const probeContext = context(loaded([endpoint()]));
+    await runTls(probeContext, capturerStub(await publicOutcome()), {}, NOW);
+
+    expect(probeContext.observedAnchors).toEqual([]);
+  });
+
+  it('records one anchor per path when the same host is captured direct and through a proxy', async () => {
+    const probeContext = context(loaded([endpoint()]));
+    await runTls(
+      probeContext,
+      capturerStub(await capturedChain()),
+      { HTTPS_PROXY: 'http://proxy.corp.test:3128' },
+      NOW,
+    );
+
+    // Two paths to one host are two observations, not one deduplicated by
+    // host: which path saw the anchor is what the cross-check correlates on.
+    expect(probeContext.observedAnchors.map((anchor) => anchor.via)).toEqual(['direct', 'proxy']);
+  });
+
+  it('records nothing when every capture failed', async () => {
+    const probeContext = context(loaded([endpoint()]));
+    await runTls(probeContext, capturerStub({ ok: false, phase: 'connect', code: 'ECONNREFUSED', abortedBy: null }), {}, NOW);
+
+    expect(probeContext.observedAnchors).toEqual([]);
   });
 });

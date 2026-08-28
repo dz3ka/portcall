@@ -1,11 +1,12 @@
 import { beforeAll, describe, expect, it } from 'vitest';
+import { X509Certificate } from '@peculiar/x509';
 import { assertRemediable } from '../src/model/finding.ts';
 import type { Finding } from '../src/model/finding.ts';
 import type { Profile } from '../src/profiles/schema.ts';
 import { PUBLIC_ROOT_CA_PEMS } from '../src/net/root-bundle.ts';
 import { EXPIRY_WARNING_DAYS, compareChains, evaluateChain } from '../src/probes/tls/evaluate.ts';
 import type { CapturedChain, ChainEvaluationOptions } from '../src/probes/tls/evaluate.ts';
-import { certificateIndex } from '../src/probes/shared/root-index.ts';
+import { canonicalDn, certificateIndex } from '../src/probes/shared/root-index.ts';
 import { derOfPem, subjectOfPem, syntheticChain } from './helpers/synthetic-chain.ts';
 
 /**
@@ -84,27 +85,27 @@ beforeAll(async () => {
 
 describe('root verdict', () => {
   it('passes a chain anchored in a root the runtime ships', () => {
-    const findings = evaluateChain(capture(PUBLIC_CHAIN), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture(PUBLIC_CHAIN), TARGET, STRICT, OPTIONS).findings;
     expect(ids(findings)).toContain('tls.public-root');
     expect(only(findings, 'tls.public-root').severity).toBe('ok');
     expect(findings.filter((finding) => finding.severity !== 'ok')).toEqual([]);
   });
 
   it('names the matched public root in the clear, because it is public knowledge', () => {
-    const finding = only(evaluateChain(capture(PUBLIC_CHAIN), TARGET, STRICT, OPTIONS), 'tls.public-root');
+    const finding = only(evaluateChain(capture(PUBLIC_CHAIN), TARGET, STRICT, OPTIONS).findings, 'tls.public-root');
     const root = finding.evidence.find((evidence) => evidence.label === 'root');
     expect(root?.kind).toBe('public');
     expect(root?.value).toBe(subjectOfPem(PUBLIC_ROOT_PEM));
   });
 
   it('blocks on a private root when the profile does not tolerate interception', () => {
-    const finding = only(evaluateChain(capture(PRIVATE_CHAIN), TARGET, STRICT, OPTIONS), 'tls.private-root');
+    const finding = only(evaluateChain(capture(PRIVATE_CHAIN), TARGET, STRICT, OPTIONS).findings, 'tls.private-root');
     expect(finding.severity).toBe('blocker');
     expect(finding.remediation).toBeTruthy();
   });
 
   it('degrades rather than blocks when the profile tolerates interception', () => {
-    const finding = only(evaluateChain(capture(PRIVATE_CHAIN), TARGET, TOLERANT, OPTIONS), 'tls.private-root');
+    const finding = only(evaluateChain(capture(PRIVATE_CHAIN), TARGET, TOLERANT, OPTIONS).findings, 'tls.private-root');
     expect(finding.severity).toBe('degraded');
   });
 
@@ -114,12 +115,12 @@ describe('root verdict', () => {
       { host: 'api.example.com', required: false },
       STRICT,
       OPTIONS,
-    );
+    ).findings;
     expect(only(findings, 'tls.private-root').severity).toBe('degraded');
   });
 
   it('carries the private root name as a `dn`, never as free text', () => {
-    const finding = only(evaluateChain(capture(PRIVATE_CHAIN), TARGET, STRICT, OPTIONS), 'tls.private-root');
+    const finding = only(evaluateChain(capture(PRIVATE_CHAIN), TARGET, STRICT, OPTIONS).findings, 'tls.private-root');
     const named = finding.evidence.filter((evidence) => evidence.value.includes('Acme Corp'));
     expect(named.length).toBeGreaterThan(0);
     for (const evidence of named) expect(evidence.kind).toBe('dn');
@@ -129,20 +130,20 @@ describe('root verdict', () => {
     // Anyone can staple a public root onto a private chain. The leaf does not
     // lead to it, so it is not part of the chain and cannot suppress the
     // blocker (WP8).
-    const findings = evaluateChain(capture(PADDED_PRIVATE_CHAIN), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture(PADDED_PRIVATE_CHAIN), TARGET, STRICT, OPTIONS).findings;
     expect(ids(findings)).not.toContain('tls.public-root');
     expect(only(findings, 'tls.private-root').severity).toBe('blocker');
   });
 
   it('reports the anchor at the end of the issuance path, not the padding after it', () => {
-    const finding = only(evaluateChain(capture(PADDED_PRIVATE_CHAIN), TARGET, STRICT, OPTIONS), 'tls.private-root');
+    const finding = only(evaluateChain(capture(PADDED_PRIVATE_CHAIN), TARGET, STRICT, OPTIONS).findings, 'tls.private-root');
     const subject = finding.evidence.find((evidence) => evidence.label === 'subject');
     expect(subject?.value).toContain('Acme Corp Internal Root');
     expect(subject?.value).not.toContain(subjectOfPem(PUBLIC_ROOT_PEM));
   });
 
   it('counts the certificates on the issuance path alongside the ones presented', () => {
-    const finding = only(evaluateChain(capture(PADDED_PRIVATE_CHAIN), TARGET, STRICT, OPTIONS), 'tls.private-root');
+    const finding = only(evaluateChain(capture(PADDED_PRIVATE_CHAIN), TARGET, STRICT, OPTIONS).findings, 'tls.private-root');
     const valueOf = (label: string): string | undefined =>
       finding.evidence.find((evidence) => evidence.label === label)?.value;
     expect(valueOf('certificates presented')).toBe('3');
@@ -154,32 +155,32 @@ describe('root verdict', () => {
       { subject: 'CN=api.example.com', issuer: 'CN=Acme Issuing CA', dnsNames: ['api.example.com'] },
       { subject: 'CN=Acme Issuing CA', issuer: subjectOfPem(PUBLIC_ROOT_PEM) },
     ]);
-    const finding = only(evaluateChain(capture(chain), TARGET, STRICT, OPTIONS), 'tls.root-indeterminate');
+    const finding = only(evaluateChain(capture(chain), TARGET, STRICT, OPTIONS).findings, 'tls.root-indeterminate');
     expect(finding.severity).toBe('unknown');
   });
 });
 
 describe('negotiated protocol', () => {
   it('passes a protocol at or above the profile minimum', () => {
-    const finding = only(evaluateChain(capture(PUBLIC_CHAIN), TARGET, STRICT, OPTIONS), 'tls.protocol');
+    const finding = only(evaluateChain(capture(PUBLIC_CHAIN), TARGET, STRICT, OPTIONS).findings, 'tls.protocol');
     expect(finding.severity).toBe('ok');
     expect(finding.evidence.map((evidence) => evidence.value)).toContain('TLSv1.3');
   });
 
   it('blocks a protocol below the profile minimum', () => {
-    const findings = evaluateChain(capture(PUBLIC_CHAIN, { negotiatedProtocol: 'TLSv1' }), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture(PUBLIC_CHAIN, { negotiatedProtocol: 'TLSv1' }), TARGET, STRICT, OPTIONS).findings;
     expect(only(findings, 'tls.protocol-below-minimum').severity).toBe('blocker');
   });
 
   it('accepts exactly the profile minimum', () => {
-    const findings = evaluateChain(capture(PUBLIC_CHAIN, { negotiatedProtocol: 'TLSv1.2' }), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture(PUBLIC_CHAIN, { negotiatedProtocol: 'TLSv1.2' }), TARGET, STRICT, OPTIONS).findings;
     expect(ids(findings)).toContain('tls.protocol');
   });
 
   it.each([null, 'TLSv9.9 (corp-inspection-gw)'])(
     'reports an unusable protocol name (%s) as unknown and never repeats it',
     (protocol) => {
-      const findings = evaluateChain(capture(PUBLIC_CHAIN, { negotiatedProtocol: protocol }), TARGET, STRICT, OPTIONS);
+      const findings = evaluateChain(capture(PUBLIC_CHAIN, { negotiatedProtocol: protocol }), TARGET, STRICT, OPTIONS).findings;
       expect(only(findings, 'tls.protocol-unknown').severity).toBe('unknown');
       expect(JSON.stringify(findings)).not.toContain('corp-inspection-gw');
     },
@@ -188,56 +189,56 @@ describe('negotiated protocol', () => {
 
 describe('validity window', () => {
   it('blocks on a certificate that has already expired', async () => {
-    const findings = evaluateChain(capture(await publicChain({ notAfter: daysFromNow(-1) })), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture(await publicChain({ notAfter: daysFromNow(-1) })), TARGET, STRICT, OPTIONS).findings;
     expect(only(findings, 'tls.chain-expired').severity).toBe('blocker');
     expect(ids(findings)).not.toContain('tls.chain-expiring-soon');
   });
 
   it('warns inside the expiry window', async () => {
     const chain = await publicChain({ notAfter: daysFromNow(EXPIRY_WARNING_DAYS - 1) });
-    const findings = evaluateChain(capture(chain), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture(chain), TARGET, STRICT, OPTIONS).findings;
     expect(only(findings, 'tls.chain-expiring-soon').severity).toBe('degraded');
   });
 
   it('says nothing about a certificate beyond the expiry window', async () => {
     const chain = await publicChain({ notAfter: daysFromNow(EXPIRY_WARNING_DAYS + 1) });
-    const findings = evaluateChain(capture(chain), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture(chain), TARGET, STRICT, OPTIONS).findings;
     expect(ids(findings)).not.toContain('tls.chain-expiring-soon');
     expect(ids(findings)).not.toContain('tls.chain-expired');
   });
 
   it('reports a certificate that is not valid yet separately: that is a clock, not a renewal', async () => {
     const chain = await publicChain({ notBefore: daysFromNow(2), notAfter: daysFromNow(400) });
-    const findings = evaluateChain(capture(chain), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture(chain), TARGET, STRICT, OPTIONS).findings;
     expect(only(findings, 'tls.chain-not-yet-valid').severity).toBe('blocker');
   });
 });
 
 describe('name matching', () => {
   it('accepts an exact dNSName match', () => {
-    expect(ids(evaluateChain(capture(PUBLIC_CHAIN), TARGET, STRICT, OPTIONS))).not.toContain('tls.sni-mismatch');
+    expect(ids(evaluateChain(capture(PUBLIC_CHAIN), TARGET, STRICT, OPTIONS).findings)).not.toContain('tls.sni-mismatch');
   });
 
   it('accepts a wildcard covering one label', async () => {
     const chain = await publicChain({ dnsNames: ['*.example.com'] });
-    expect(ids(evaluateChain(capture(chain), TARGET, STRICT, OPTIONS))).not.toContain('tls.sni-mismatch');
+    expect(ids(evaluateChain(capture(chain), TARGET, STRICT, OPTIONS).findings)).not.toContain('tls.sni-mismatch');
   });
 
   it('does not let a wildcard span a dot', async () => {
     const chain = await publicChain({ dnsNames: ['*.example.com'] });
-    const findings = evaluateChain(capture(chain, { requestedSni: 'a.b.example.com' }), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture(chain, { requestedSni: 'a.b.example.com' }), TARGET, STRICT, OPTIONS).findings;
     expect(only(findings, 'tls.sni-mismatch').severity).toBe('blocker');
   });
 
   it('does not let a wildcard match the bare parent domain', async () => {
     const chain = await publicChain({ dnsNames: ['*.example.com'] });
-    const findings = evaluateChain(capture(chain, { requestedSni: 'example.com' }), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture(chain, { requestedSni: 'example.com' }), TARGET, STRICT, OPTIONS).findings;
     expect(ids(findings)).toContain('tls.sni-mismatch');
   });
 
   it('blocks when no SAN entry covers the name that was asked for', async () => {
     const chain = await publicChain({ dnsNames: ['other.example.net'] });
-    const finding = only(evaluateChain(capture(chain), TARGET, STRICT, OPTIONS), 'tls.sni-mismatch');
+    const finding = only(evaluateChain(capture(chain), TARGET, STRICT, OPTIONS).findings, 'tls.sni-mismatch');
     expect(finding.severity).toBe('blocker');
     const hostnames = finding.evidence.filter((evidence) => evidence.kind === 'hostname');
     expect(hostnames.map((evidence) => evidence.value)).toContain('other.example.net');
@@ -245,13 +246,13 @@ describe('name matching', () => {
 
   it('reports a leaf with no SAN extension as its own finding', async () => {
     const chain = await publicChain({}, false);
-    const findings = evaluateChain(capture(chain), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture(chain), TARGET, STRICT, OPTIONS).findings;
     expect(only(findings, 'tls.leaf-no-san').severity).toBe('blocker');
     expect(ids(findings)).not.toContain('tls.sni-mismatch');
   });
 
   it('judges no name at all when the target was a literal address', () => {
-    const findings = evaluateChain(capture(PUBLIC_CHAIN, { requestedSni: '' }), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture(PUBLIC_CHAIN, { requestedSni: '' }), TARGET, STRICT, OPTIONS).findings;
     expect(ids(findings)).not.toContain('tls.sni-mismatch');
     expect(ids(findings)).not.toContain('tls.leaf-no-san');
   });
@@ -259,13 +260,13 @@ describe('name matching', () => {
 
 describe('chains that cannot be read', () => {
   it('reports an empty chain as unknown rather than guessing', () => {
-    const findings = evaluateChain(capture([]), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture([]), TARGET, STRICT, OPTIONS).findings;
     expect(ids(findings)).toEqual(['tls.chain-empty']);
     expect(only(findings, 'tls.chain-empty').severity).toBe('unknown');
   });
 
   it('reports unparseable DER as unknown rather than throwing', () => {
-    const findings = evaluateChain(capture([new Uint8Array([0x30, 0x01, 0x00])]), TARGET, STRICT, OPTIONS);
+    const findings = evaluateChain(capture([new Uint8Array([0x30, 0x01, 0x00])]), TARGET, STRICT, OPTIONS).findings;
     expect(ids(findings)).toEqual(['tls.chain-unparseable']);
   });
 });
@@ -300,7 +301,7 @@ describe('direct versus proxied chain', () => {
 
     const compared = compareChains(capture(PUBLIC_CHAIN), proxied, target);
     expect(only(compared, 'tls.intercepted-via-proxy').severity).toBe('degraded');
-    expect(only(evaluateChain(proxied, target, profile, OPTIONS), 'tls.private-root').severity).toBe(trustVerdict);
+    expect(only(evaluateChain(proxied, target, profile, OPTIONS).findings, 'tls.private-root').severity).toBe(trustVerdict);
   });
 
   it('holds it at degraded when the two chains differ but both are publicly rooted', async () => {
@@ -338,7 +339,7 @@ describe('the remediation rule', () => {
     const findings = chains.flatMap((chain) =>
       [STRICT, TOLERANT].flatMap((profile) =>
         [null, 'TLSv1', 'TLSv1.3'].flatMap((protocol) =>
-          evaluateChain(capture(chain, { negotiatedProtocol: protocol }), TARGET, profile, OPTIONS),
+          evaluateChain(capture(chain, { negotiatedProtocol: protocol }), TARGET, profile, OPTIONS).findings,
         ),
       ),
     );
@@ -356,10 +357,101 @@ describe('root verdict on the issuance path', () => {
       { subject: 'CN=Acme Issuing CA', issuer: subjectOfPem(PUBLIC_ROOT_PEM) },
       { subject: 'CN=Unrelated Self-Signed Root' },
     ]);
-    const finding = only(evaluateChain(capture(chain), TARGET, STRICT, OPTIONS), 'tls.root-indeterminate');
+    const finding = only(evaluateChain(capture(chain), TARGET, STRICT, OPTIONS).findings, 'tls.root-indeterminate');
     const named = finding.evidence.find((evidence) => evidence.label === 'names as issuer');
     expect(named?.value).toBe(subjectOfPem(PUBLIC_ROOT_PEM));
     const onPath = finding.evidence.find((evidence) => evidence.label === 'certificates on issuance path');
     expect(onPath?.value).toBe('2');
+  });
+});
+
+/**
+ * The anchor the evaluation hands back for the `truststore` cross-check (D3,
+ * ADR-0034). This is the seam's contract in one place: which chains produce an
+ * observation at all, which certificate it names, and when the DER is present.
+ *
+ * The canonical DNs are computed here from the same certificate the assertion
+ * is about, rather than spelled as literals - what is under test is *which*
+ * certificate the anchor names, not how `canonicalDn` spells a DN, which
+ * `test/tls-public-roots.test.ts` owns.
+ */
+describe('observed anchor', () => {
+  function canonicalOf(der: Uint8Array): { subject: string; issuer: string } {
+    const certificate = new X509Certificate(der);
+    return { subject: canonicalDn(certificate.subjectName), issuer: canonicalDn(certificate.issuerName) };
+  }
+
+  function terminusOf(chain: readonly Uint8Array[]): Uint8Array {
+    const der = chain.at(-1);
+    if (der === undefined) throw new Error('a chain with no terminus');
+    return der;
+  }
+
+  it('observes nothing for a chain anchored in a bundled root', () => {
+    expect(evaluateChain(capture(PUBLIC_CHAIN), TARGET, STRICT, OPTIONS).anchor).toBeNull();
+  });
+
+  it('observes nothing for a chain that is empty or unparseable', () => {
+    expect(evaluateChain(capture([]), TARGET, STRICT, OPTIONS).anchor).toBeNull();
+    expect(evaluateChain(capture([new Uint8Array([0x30, 0x01, 0x00])]), TARGET, STRICT, OPTIONS).anchor).toBeNull();
+  });
+
+  it('carries the DER when the peer presented a self-signed private anchor', () => {
+    const anchor = evaluateChain(capture(PRIVATE_CHAIN), TARGET, STRICT, OPTIONS).anchor;
+    const root = terminusOf(PRIVATE_CHAIN);
+    expect(anchor).toEqual({
+      der: root,
+      canonicalIssuer: canonicalOf(root).issuer,
+      canonicalSubject: canonicalOf(root).subject,
+      host: 'api.example.com',
+      via: 'direct',
+      anchorClass: 'private',
+    });
+  });
+
+  it('names the terminus of the issuance path, not the last certificate in the array', () => {
+    // `PADDED_PRIVATE_CHAIN` ends with an off-path public root; the anchor must
+    // describe the private root the leaf actually leads to, or the cross-check
+    // would correlate against padding.
+    const anchor = evaluateChain(capture(PADDED_PRIVATE_CHAIN), TARGET, STRICT, OPTIONS).anchor;
+    expect(anchor?.der).toEqual(terminusOf(PRIVATE_CHAIN));
+    expect(anchor?.canonicalSubject).toBe(canonicalOf(terminusOf(PRIVATE_CHAIN)).subject);
+  });
+
+  it('carries no DER when the private anchor was named but never presented', async () => {
+    const chain = await syntheticChain([
+      { subject: 'CN=api.example.com', issuer: 'CN=Acme Issuing CA', dnsNames: ['api.example.com'] },
+      { subject: 'CN=Acme Issuing CA', issuer: 'CN=Acme Corp Internal Root, O=Acme Corp' },
+    ]);
+    const anchor = evaluateChain(capture(chain), TARGET, STRICT, OPTIONS).anchor;
+    expect(anchor?.der).toBeNull();
+    expect(anchor?.anchorClass).toBe('private');
+    expect(anchor?.canonicalIssuer).toBe(canonicalOf(terminusOf(chain)).issuer);
+    expect(anchor?.canonicalSubject).toBe(canonicalOf(terminusOf(chain)).subject);
+  });
+
+  it('records an indeterminate anchor when the chain names a bundled root it did not present', async () => {
+    const chain = await syntheticChain([
+      { subject: 'CN=api.example.com', issuer: 'CN=Acme Issuing CA', dnsNames: ['api.example.com'] },
+      { subject: 'CN=Acme Issuing CA', issuer: subjectOfPem(PUBLIC_ROOT_PEM) },
+    ]);
+    const anchor = evaluateChain(capture(chain), TARGET, STRICT, OPTIONS).anchor;
+    expect(anchor?.anchorClass).toBe('indeterminate');
+    expect(anchor?.der).toBeNull();
+    expect(anchor?.canonicalIssuer).toBe(canonicalOf(terminusOf(chain)).issuer);
+  });
+
+  it('carries the capture path, so two observations of one host stay distinct', () => {
+    const anchor = evaluateChain(capture(PRIVATE_CHAIN, { via: 'proxy' }), TARGET, STRICT, OPTIONS).anchor;
+    expect(anchor?.via).toBe('proxy');
+    expect(anchor?.host).toBe('api.example.com');
+  });
+
+  it('does not depend on whether the profile tolerates interception', () => {
+    // Tolerance changes the finding's severity, never what was observed: the
+    // cross-check has to see the anchor either way (D4).
+    const strict = evaluateChain(capture(PRIVATE_CHAIN), TARGET, STRICT, OPTIONS).anchor;
+    const tolerant = evaluateChain(capture(PRIVATE_CHAIN), TARGET, TOLERANT, OPTIONS).anchor;
+    expect(tolerant).toEqual(strict);
   });
 });

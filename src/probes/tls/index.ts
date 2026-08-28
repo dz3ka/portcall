@@ -157,7 +157,12 @@ async function checkTarget(
       via: path,
     };
     chains[path] = chain;
-    findings.push(...evaluateChain(chain, { host: target.host, required: target.required }, context.profile.profile, options));
+    const evaluation = evaluateChain(chain, { host: target.host, required: target.required }, context.profile.profile, options);
+    findings.push(...evaluation.findings);
+    // The run's one mutation of the shared observation array (ADR-0034): one
+    // push per path, so a host seen direct and through a proxy is two
+    // observations, which is what the cross-check correlates on.
+    if (evaluation.anchor !== null) context.observedAnchors.push(evaluation.anchor);
   }
 
   // Refuses to conclude anything when either side is missing - the failure that

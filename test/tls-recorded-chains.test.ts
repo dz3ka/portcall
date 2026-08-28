@@ -56,6 +56,7 @@ function context(profile: LoadedProfile): ProbeContext {
     net: new NetworkGuard(profile.profile),
     deadline: Date.now() + 60_000,
     signal: new AbortController().signal,
+    observedAnchors: [],
   };
 }
 

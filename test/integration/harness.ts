@@ -98,6 +98,7 @@ export function harnessContext(profile: LoadedProfile = harnessProfile()): Probe
     // hanging CI, which is the same reason the `binaries` job has a timeout.
     deadline: Date.now() + 60_000,
     signal: new AbortController().signal,
+    observedAnchors: [],
   };
 }
 
