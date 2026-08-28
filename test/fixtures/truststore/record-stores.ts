@@ -108,6 +108,7 @@ if (commands.length === 0) {
           kind: command.kind,
           format: command.format,
           file: command.file,
+          locator: command.locator,
           argv: command.argv,
           exit: result.exit,
           signal: result.signal,

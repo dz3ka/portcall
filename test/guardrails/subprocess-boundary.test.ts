@@ -36,6 +36,7 @@ const EXPECTED_COMMANDS = [
     kind: 'macos-system-roots',
     file: '/usr/bin/security',
     argv: ['find-certificate', '-a', '-p', '/System/Library/Keychains/SystemRootCertificates.keychain'],
+    locator: '/System/Library/Keychains/SystemRootCertificates.keychain',
     format: 'pem-stream',
   },
   {
@@ -43,6 +44,7 @@ const EXPECTED_COMMANDS = [
     kind: 'macos-admin-anchors',
     file: '/usr/bin/security',
     argv: ['find-certificate', '-a', '-p', '/Library/Keychains/System.keychain'],
+    locator: '/Library/Keychains/System.keychain',
     format: 'pem-stream',
   },
   {
@@ -56,6 +58,7 @@ const EXPECTED_COMMANDS = [
       '-Command',
       'Get-ChildItem -Path Cert:\\LocalMachine\\Root | ForEach-Object { [System.Convert]::ToBase64String($_.RawData) }',
     ],
+    locator: 'Cert:\\LocalMachine\\Root',
     format: 'base64-der-lines',
   },
 ];

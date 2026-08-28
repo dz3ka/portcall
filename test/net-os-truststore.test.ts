@@ -51,6 +51,7 @@ function nodeCommand(script: string, format: 'pem-stream' | 'base64-der-lines'):
     kind: 'linux-ca-bundle',
     file: process.execPath,
     argv: ['-e', script],
+    locator: process.execPath,
     format,
   };
 }
@@ -125,6 +126,18 @@ describe('os trust store command table', () => {
     }
   });
 
+  it('has a store to read on darwin, win32 and linux, so only another platform reads empty', () => {
+    // The postcondition `OsTrustStoreReader.read` states and the probe depends
+    // on: an empty array means the platform, never a failed read. Asserted on
+    // the table rather than by calling `read()`, which only ever runs one of
+    // the three branches on any one runner.
+    const rows = (platform: NodeJS.Platform): number =>
+      OS_TRUSTSTORE_COMMANDS.filter((command) => command.platform === platform).length;
+    expect(rows('darwin')).toBe(2);
+    expect(rows('win32')).toBe(1);
+    expect(LINUX_CA_BUNDLE_PATHS.length).toBeGreaterThan(0);
+  });
+
   it('reads the Linux bundle with no subprocess at all', () => {
     expect(LINUX_CA_BUNDLE_PATHS.length).toBeGreaterThan(0);
     expect(OS_TRUSTSTORE_COMMANDS.some((command) => command.platform === 'linux')).toBe(false);
@@ -135,7 +148,14 @@ describe('os trust store reader kill paths', () => {
   it('yields reader-missing for a file that is not there, and never throws', async () => {
     const missing = join(process.cwd(), 'portcall-no-such-reader-binary');
     const outcome = await readOneStore(
-      { platform: process.platform, kind: 'linux-ca-bundle', file: missing, argv: ['-a'], format: 'pem-stream' },
+      {
+        platform: process.platform,
+        kind: 'linux-ca-bundle',
+        file: missing,
+        argv: ['-a'],
+        locator: missing,
+        format: 'pem-stream',
+      },
       { signal: quiet(), timeoutMs: SUBPROCESS_TIMEOUT_MS },
     );
     expect(outcome.failure).toBe('reader-missing');
@@ -162,7 +182,7 @@ describe('os trust store reader kill paths', () => {
     expect(Date.now() - started).toBeLessThan(10_000);
   });
 
-  it('kills the child when the run signal fires, distinguishably from a timeout', async () => {
+  it('kills the child when the run signal fires, and calls it aborted, not reader-failed', async () => {
     const controller = new AbortController();
     setTimeout(() => {
       controller.abort();
@@ -171,7 +191,9 @@ describe('os trust store reader kill paths', () => {
       signal: controller.signal,
       timeoutMs: 30_000,
     });
-    expect(outcome.failure).toBe('reader-failed');
+    // Not `reader-failed`: the operator pressed Ctrl-C, which says nothing
+    // about whether this machine's trust store can be read (CLAUDE.md).
+    expect(outcome.failure).toBe('aborted');
     expect(outcome.code).toBe('run-signal');
   });
 
@@ -288,6 +310,7 @@ function platformKinds(): string[] {
 /** `pems` is empty exactly when `failure` is non-null (types.ts), and no field carries prose. */
 function assertWellFormed(outcome: TrustStoreOutcome): void {
   expect(outcome.pems.length === 0).toBe(outcome.failure !== null);
-  expect(outcome.locator).toMatch(/^(?:\/|[A-Z]:\\)/);
+  const stores = [...OS_TRUSTSTORE_COMMANDS.map((command) => command.locator), ...LINUX_CA_BUNDLE_PATHS];
+  expect(stores, `${outcome.locator} is not a store this build reads`).toContain(outcome.locator);
   if (outcome.code !== null) expect(outcome.code).toMatch(/^(?:[A-Z][A-Z0-9_]*|exit:\d+|signal:[A-Z0-9]+|run-signal)$/);
 }

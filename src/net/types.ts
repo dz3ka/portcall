@@ -204,11 +204,19 @@ export type TrustStoreKind =
   | 'windows-machine-root' // the LocalMachine Root store
   | 'linux-ca-bundle'; // /etc/ssl/certs/ca-certificates.crt or /etc/pki/tls/certs/ca-bundle.crt
 
-/** Why a store read produced nothing. Closed class: these are different tickets (CLAUDE.md). */
+/**
+ * Why a store read produced nothing. Closed class: these are different tickets
+ * (CLAUDE.md). All but one are produced by the reader, on an outcome.
+ * `unsupported-platform` is produced by the *probe*, from an empty `read()`: a
+ * platform that is neither darwin, win32 nor linux has no store for a
+ * `TrustStoreKind` to name honestly, so the absence of outcomes is the signal,
+ * and this is the word the probe puts in the finding.
+ */
 export type TrustStoreFailure =
-  | 'unsupported-platform' // not darwin/win32/linux
+  | 'unsupported-platform' // not darwin/win32/linux. Synthesised by the probe, never by the reader
   | 'reader-missing' // the absolute-path binary or the file does not exist
-  | 'reader-failed' // non-zero exit, or killed by a signal
+  | 'reader-failed' // non-zero exit, or killed by a signal we did not send
+  | 'aborted' // the run's AbortSignal fired; the child was killed. Says nothing about this machine
   | 'timeout' // exceeded SUBPROCESS_TIMEOUT_MS; the child was killed
   | 'output-too-large' // exceeded MAX_STORE_OUTPUT_BYTES; the child was killed
   | 'no-certificates'; // ran cleanly, parsed nothing
@@ -216,16 +224,30 @@ export type TrustStoreFailure =
 /** One store's read. `pems` is empty exactly when `failure` is non-null. */
 export interface TrustStoreOutcome {
   kind: TrustStoreKind;
-  /** Absolute path invoked or read. Emitted as `path` evidence, so redaction hashes it. */
+  /**
+   * The store that was read, named as an operator would name it: a keychain
+   * path, the machine `Root` store path on win32, the bundle file on linux.
+   * **Not** the tool that read it - one binary reads both macOS keychains, so a
+   * tool-named locator prints the same value on two rows and no `remediation`
+   * built from it could name the keychain to export from. The tool is pinned in
+   * `OS_TRUSTSTORE_COMMANDS`. Emitted as `path` evidence, so redaction hashes it.
+   */
   locator: string;
   pems: readonly string[];
   failure: TrustStoreFailure | null;
-  /** Machine code only - exit:1, signal:SIGKILL, ENOENT. Never the child's stderr (ADR-0009). */
+  /** Machine code only - exit:1, signal:SIGKILL, ENOENT, run-signal. Never the child's stderr (ADR-0009). */
   code: string | null;
 }
 
 export interface OsTrustStoreReader {
-  /** Every store this platform has. Never throws; a failure is an outcome. */
+  /**
+   * Every store this platform has - never fewer than one on darwin, win32 and
+   * linux, because a failed read is an outcome, not an omission. Never throws.
+   *
+   * **Postcondition, and the probe depends on it:** the array is empty *exactly
+   * when* the platform is none of those three. That is what the probe turns into
+   * `unsupported-platform`; nothing else may produce an empty array.
+   */
   read(options: { signal: AbortSignal; timeoutMs: number }): Promise<readonly TrustStoreOutcome[]>;
 }
 
@@ -237,10 +259,18 @@ export interface OsTrustStoreReader {
 export interface TrustStoreCommand {
   platform: NodeJS.Platform;
   kind: TrustStoreKind;
-  /** Absolute path. Never resolved through PATH (ADR-0033). */
+  /** Absolute path of the tool. Never resolved through PATH (ADR-0033). */
   file: string;
   /** String literals only: no interpolation, no concatenation. Pinned by the guardrail. */
   argv: readonly string[];
+  /**
+   * The store this command reads, as an operator would name it and as the
+   * remediation will spell it. A source literal like every other field, pinned
+   * by the same guardrail, and deliberately redundant with `argv` on darwin:
+   * deriving it from `argv` would be a value built at run time inside the
+   * pinned region, which is the one thing that region forbids.
+   */
+  locator: string;
   /** How stdout becomes PEMs. */
   format: 'pem-stream' | 'base64-der-lines';
 }
@@ -273,6 +303,14 @@ export interface RuntimeStoreOutcome {
   kind: RuntimeStoreKind;
   /** Path or env-var name. `path` evidence. Null for `node-bundled` and `platform-verifier`. */
   locator: string | null;
+  /**
+   * Every path or env var actually consulted for this outcome, in try order,
+   * capped at MAX_DISCOVERY_MATCHES. This is what `truststore.<rt>.store-not-found`
+   * lists (3.8), and the reason a `not-found` outcome is still worth emitting:
+   * "portcall looked here, here and here" is the actionable half of that finding.
+   * Empty only for kinds with nothing to search (`node-bundled`, `platform-verifier`).
+   */
+  searched: readonly string[];
   /** How this store combines with its siblings for the same runtime. See `trustSets`. */
   combines: 'adds-to' | 'replaces' | 'standalone';
   pems: readonly string[];
@@ -286,6 +324,21 @@ export interface RuntimeStoreOutcome {
 }
 
 export interface RuntimeStoreReader {
+  /**
+   * At least one outcome per requested runtime, always - the counterpart of
+   * `OsTrustStoreReader`'s postcondition, inverted, and for a reason. The OS
+   * reader is asked "what does this machine have?", so an empty answer *is* the
+   * answer. This reader is asked "for these runtimes, what do they consult?",
+   * and every declared runtime is owed a row: a runtime that is not installed,
+   * or a platform this reader has no table for, is `failure: 'not-found'` with
+   * `searched` listing what was tried (possibly empty) - never a missing
+   * outcome. There is no `unsupported-platform` here because `RuntimeStoreKind`
+   * names an intent - where a runtime *would* look - which stays nameable on
+   * every platform, unlike a store that does not exist.
+   *
+   * No `AbortSignal`: these are bounded file reads, so there is no `aborted`
+   * failure either. Never throws.
+   */
   read(
     runtimes: readonly Runtime[],
     options: { env: NodeJS.ProcessEnv; platform: NodeJS.Platform; maxBytes: number },

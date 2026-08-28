@@ -56,6 +56,7 @@ const COMMAND_TABLE: readonly TrustStoreCommand[] = [
     kind: 'macos-system-roots',
     file: '/usr/bin/security',
     argv: ['find-certificate', '-a', '-p', '/System/Library/Keychains/SystemRootCertificates.keychain'],
+    locator: '/System/Library/Keychains/SystemRootCertificates.keychain',
     format: 'pem-stream',
   },
   {
@@ -63,6 +64,7 @@ const COMMAND_TABLE: readonly TrustStoreCommand[] = [
     kind: 'macos-admin-anchors',
     file: '/usr/bin/security',
     argv: ['find-certificate', '-a', '-p', '/Library/Keychains/System.keychain'],
+    locator: '/Library/Keychains/System.keychain',
     format: 'pem-stream',
   },
   {
@@ -76,6 +78,7 @@ const COMMAND_TABLE: readonly TrustStoreCommand[] = [
       '-Command',
       'Get-ChildItem -Path Cert:\\LocalMachine\\Root | ForEach-Object { [System.Convert]::ToBase64String($_.RawData) }',
     ],
+    locator: 'Cert:\\LocalMachine\\Root',
     format: 'base64-der-lines',
   },
 ];
@@ -156,10 +159,10 @@ export function readOneStore(
   options: { signal: AbortSignal; timeoutMs: number },
 ): Promise<TrustStoreOutcome> {
   const outcome = (failure: TrustStoreFailure | null, code: string | null, pems: readonly string[]): TrustStoreOutcome =>
-    ({ kind: command.kind, locator: command.file, pems, failure, code });
+    ({ kind: command.kind, locator: command.locator, pems, failure, code });
 
   if (options.signal.aborted) {
-    return Promise.resolve(outcome('reader-failed', 'run-signal', []));
+    return Promise.resolve(outcome('aborted', 'run-signal', []));
   }
 
   return new Promise<TrustStoreOutcome>((resolve) => {
@@ -176,8 +179,9 @@ export function readOneStore(
     });
 
     // A timeout and the run's abort both end in SIGKILL, but they stay
-    // distinguishable in `code`: "the store took too long" and "the operator
-    // pressed Ctrl-C" are different tickets (CLAUDE.md).
+    // distinguishable in `failure` as well as `code`: "the store took too long"
+    // is a claim about this machine and "the operator pressed Ctrl-C" is not,
+    // so they are different tickets (CLAUDE.md) and `aborted` is its own word.
     const kill = (reason: Killed): void => {
       if (killed !== null || settled) return;
       killed = reason;
@@ -185,7 +189,7 @@ export function readOneStore(
       child.kill('SIGKILL');
     };
     const onAbort = (): void => {
-      kill({ failure: 'reader-failed', code: 'run-signal' });
+      kill({ failure: 'aborted', code: 'run-signal' });
     };
     const timer = setTimeout(() => {
       kill({ failure: 'timeout', code: 'signal:SIGKILL' });
@@ -285,7 +289,9 @@ export const osTrustStoreReader: OsTrustStoreReader = {
    * Every store this platform has, in table order. A platform that is neither
    * darwin, win32 nor linux has no row and no bundle, so this returns an empty
    * array and the probe reports `unsupported-platform` from it - there is no
-   * `TrustStoreKind` that would honestly describe a store that does not exist.
+   * `TrustStoreKind` that would honestly describe a store that does not exist,
+   * and nothing else returns an empty array: on darwin, win32 and linux a
+   * failed read is an outcome, so the probe may read emptiness as the platform.
    *
    * The stores are read one at a time. There are at most two, each takes about
    * a second, and running them concurrently would put two children under one
