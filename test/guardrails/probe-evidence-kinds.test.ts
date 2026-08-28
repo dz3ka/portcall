@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { NetworkGuard, NetworkPolicyError } from '../../src/net/guard.ts';
 import { extractCode } from '../../src/net/dns.ts';
 import type { AttemptPhase, DnsOutcome, DnsResolver, EndpointAttempt, EndpointProber } from '../../src/net/types.ts';
-import type { ProbeContext } from '../../src/engine/index.ts';
+import type { ObservedAnchor, ProbeContext } from '../../src/engine/index.ts';
 import type { ProbeErrorClass } from '../../src/engine/probe-error.ts';
 import { probeErrorFinding } from '../../src/engine/probe-error.ts';
 import type { Evidence, Finding } from '../../src/model/finding.ts';
@@ -25,8 +25,19 @@ import { compareChains, evaluateChain } from '../../src/probes/tls/evaluate.ts';
 import type { CapturedChain } from '../../src/probes/tls/evaluate.ts';
 import { runTls } from '../../src/probes/tls/index.ts';
 import { certificateIndex } from '../../src/probes/shared/root-index.ts';
+import { crossCheck } from '../../src/probes/truststore/evaluate.ts';
+import { OS_TRUSTSTORE_COMMANDS } from '../../src/net/os-truststore.ts';
+import { derToPem } from '../../src/net/pem.ts';
+import type {
+  RuntimeStoreFailure,
+  RuntimeStoreKind,
+  RuntimeStoreOutcome,
+  TrustStoreFailure,
+  TrustStoreKind,
+  TrustStoreOutcome,
+} from '../../src/net/types.ts';
 import type { RootReason } from '../../src/probes/tls/public-roots.ts';
-import { derOfPem, subjectOfPem, syntheticChain } from '../helpers/synthetic-chain.ts';
+import { derOfPem, subjectOfPem, syntheticCert, syntheticChain } from '../helpers/synthetic-chain.ts';
 
 /**
  * SPEC.md 4.5 / ADR-0005: `text` evidence crosses the redaction boundary
@@ -145,6 +156,61 @@ const TLS_CAPTURE_PHASES: Record<TlsCapturePhase, true> = { dns: true, connect: 
 /** Which path a chain was captured over (M3). Our own knowledge, not the peer's. */
 const CAPTURE_PATHS: Record<CapturedChain['via'], true> = { direct: true, proxy: true };
 
+/** `TrustStoreKind` (M4), reported as the `store` evidence on every OS-store finding. */
+const TRUST_STORE_KINDS: Record<TrustStoreKind, true> = {
+  'macos-system-roots': true,
+  'macos-admin-anchors': true,
+  'windows-machine-root': true,
+  'linux-ca-bundle': true,
+};
+
+/** `TrustStoreFailure` (M4), reported as the `failure` evidence. Includes the one the probe synthesises. */
+const TRUST_STORE_FAILURES: Record<TrustStoreFailure, true> = {
+  'unsupported-platform': true,
+  'reader-missing': true,
+  'reader-failed': true,
+  aborted: true,
+  timeout: true,
+  'output-too-large': true,
+  'no-certificates': true,
+};
+
+/** `RuntimeStoreKind` (M4), reported as the `store` evidence on a runtime-store finding. */
+const RUNTIME_STORE_KINDS: Record<RuntimeStoreKind, true> = {
+  'node-bundled': true,
+  'node-extra-ca': true,
+  'go-ssl-cert-file': true,
+  'go-ssl-cert-dir': true,
+  'python-certifi': true,
+  'python-ssl-cert-file': true,
+  'python-requests-ca-bundle': true,
+  'java-cacerts': true,
+  'platform-verifier': true,
+};
+
+/** `RuntimeStoreFailure` (M4). `no-certificates` is shared with the OS union above; a Set dedupes it. */
+const RUNTIME_STORE_FAILURES: Record<RuntimeStoreFailure, true> = {
+  'not-configured': true,
+  'not-found': true,
+  unreadable: true,
+  'output-too-large': true,
+  'unsupported-format': true,
+  'unsupported-encoding': true,
+  truncated: true,
+  encrypted: true,
+  'no-certificates': true,
+};
+
+/** Which keystore container was found, reported as `format` evidence on the java findings. */
+const KEYSTORE_FORMATS: Record<NonNullable<RuntimeStoreOutcome['format']>, true> = { jks: true, pkcs12: true };
+
+/**
+ * How an observed anchor was tied to a missing one (M4). A literal list rather
+ * than an import, because the union is private to the cross-check - and the
+ * assertion that matters is that these two words never merge into one.
+ */
+const MATCH_STRENGTHS = ['bytes', 'issuer-name'] as const;
+
 const TEXT_VOCABULARY: ReadonlySet<string> = new Set([
   ...Object.keys(RESOLVE_FAILURES),
   ...Object.keys(DOH_OUTCOMES),
@@ -157,6 +223,12 @@ const TEXT_VOCABULARY: ReadonlySet<string> = new Set([
   ...Object.keys(ROOT_REASONS),
   ...Object.keys(TLS_CAPTURE_PHASES),
   ...Object.keys(CAPTURE_PATHS),
+  ...Object.keys(TRUST_STORE_KINDS),
+  ...Object.keys(TRUST_STORE_FAILURES),
+  ...Object.keys(RUNTIME_STORE_KINDS),
+  ...Object.keys(RUNTIME_STORE_FAILURES),
+  ...Object.keys(KEYSTORE_FORMATS),
+  ...MATCH_STRENGTHS,
   ...TLS_PROTOCOLS,
   // The profile's `tls.min_version`, echoed back as the floor a protocol failed
   // to clear. It comes from the profile schema, never from the network.
@@ -172,12 +244,25 @@ const TEXT_VOCABULARY: ReadonlySet<string> = new Set([
  */
 const MACHINE_CODE = /^[A-Z][A-Z0-9_]{1,63}$/;
 
+/**
+ * The trust-store reader's own codes (M4). `code` evidence there is not an
+ * errno space: it is `exit:N` and `signal:NAME` for a child that answered
+ * badly, plus two words this repo wrote - `run-signal` for a cancelled run and
+ * `budget-exhausted` for a store that was never started (ADR-0037). None of it
+ * comes from the child, whose stderr is drained and dropped, so the shape is
+ * pinned here beside `MACHINE_CODE` rather than widening that regex - an errno
+ * and an exit status are different things and a reader should be able to tell
+ * from this file which one it is looking at.
+ */
+const STORE_CODE = /^(?:exit:\d{1,5}|signal:[A-Z][A-Z0-9]{1,14}|run-signal|budget-exhausted)$/;
+
 /** Labels whose value is a machine code rather than a word from our vocabulary. */
 const CODE_LABELS: ReadonlySet<string> = new Set(['code']);
 
 function isAllowedText(evidence: Evidence): boolean {
   if (TEXT_VOCABULARY.has(evidence.value)) return true;
-  return CODE_LABELS.has(evidence.label) && MACHINE_CODE.test(evidence.value);
+  if (!CODE_LABELS.has(evidence.label)) return false;
+  return MACHINE_CODE.test(evidence.value) || STORE_CODE.test(evidence.value);
 }
 
 function offenders(findings: readonly Finding[]): string[] {
@@ -411,6 +496,174 @@ async function tlsShellFindings(): Promise<Finding[]> {
   return findings.flat();
 }
 
+
+/**
+ * The `truststore` cross-check (M4) has the widest `text` vocabulary in the
+ * repo - two store-kind unions, two failure unions, a container format, a match
+ * strength and the reader's own codes - and the most dangerous evidence: an OS
+ * store holds a customer's private CA, whose DN routinely spells their
+ * organisation's name. Every finding the cross-check can emit is driven here,
+ * with hostile values in every slot that touches customer data.
+ */
+async function truststoreFindings(): Promise<Finding[]> {
+  const publicRootPem = derToPem(await syntheticCert({ subject: 'CN=Example Public Root CA' }));
+  const localRootPem = derToPem(await syntheticCert({ subject: 'CN=Acme Corp Internal Root, O=Acme Corp Ltd' }));
+  const localRootDer = derOfPem(localRootPem);
+
+  const osStore = (overrides: Partial<TrustStoreOutcome>): TrustStoreOutcome => ({
+    kind: 'linux-ca-bundle',
+    locator: '/etc/ssl/certs/ca-certificates.crt',
+    pems: [],
+    failure: null,
+    code: null,
+    budgetMs: null,
+    ...overrides,
+  });
+
+  const runtimeStore = (
+    overrides: Partial<RuntimeStoreOutcome> & Pick<RuntimeStoreOutcome, 'runtime' | 'kind' | 'combines'>,
+  ): RuntimeStoreOutcome => ({
+    locator: null,
+    searched: [],
+    pems: [],
+    format: null,
+    partial: false,
+    failure: null,
+    code: null,
+    ...overrides,
+  });
+
+  // Every OS-store shape: read, each failure class, both timeout codes, and the
+  // empty array that means "this platform has no store to read".
+  const osShapes: readonly TrustStoreOutcome[][] = [
+    [osStore({ pems: [publicRootPem, localRootPem] })],
+    [
+      osStore({
+        kind: 'macos-system-roots',
+        locator: '/System/Library/Keychains/SystemRootCertificates.keychain',
+        pems: [localRootPem],
+      }),
+      osStore({
+        kind: 'macos-admin-anchors',
+        locator: '/Library/Keychains/System.keychain',
+        failure: 'reader-failed',
+        code: 'exit:1',
+      }),
+    ],
+    [osStore({ failure: 'reader-missing', code: 'ENOENT' })],
+    [osStore({ failure: 'output-too-large', code: 'signal:SIGKILL' })],
+    [osStore({ failure: 'no-certificates', code: null })],
+    [osStore({ kind: 'windows-machine-root', failure: 'timeout', code: 'signal:SIGKILL', budgetMs: 3_000 })],
+    [osStore({ kind: 'windows-machine-root', failure: 'timeout', code: 'budget-exhausted', budgetMs: 0 })],
+    [osStore({ failure: 'aborted', code: 'run-signal', budgetMs: 0 })],
+    [],
+  ];
+
+  // Every runtime-store shape, including a customer's real paths as locators
+  // and a `code` from the OS errno space.
+  const runtimeStores: readonly RuntimeStoreOutcome[] = [
+    runtimeStore({ runtime: 'node', kind: 'node-bundled', combines: 'standalone', pems: [publicRootPem] }),
+    runtimeStore({
+      runtime: 'node',
+      kind: 'node-extra-ca',
+      combines: 'adds-to',
+      locator: 'C:\\Users\\jdoe\\corp-root.pem',
+      searched: ['NODE_EXTRA_CA_CERTS'],
+      failure: 'unreadable',
+      code: 'EACCES',
+    }),
+    runtimeStore({
+      runtime: 'go',
+      kind: 'go-ssl-cert-file',
+      combines: 'replaces',
+      locator: 'SSL_CERT_FILE',
+      searched: ['SSL_CERT_FILE'],
+      failure: 'not-configured',
+    }),
+    runtimeStore({
+      runtime: 'go',
+      kind: 'go-ssl-cert-dir',
+      combines: 'replaces',
+      locator: '/home/jdoe/certs',
+      searched: ['SSL_CERT_DIR'],
+      pems: [publicRootPem],
+    }),
+    runtimeStore({ runtime: 'go', kind: 'platform-verifier', combines: 'standalone' }),
+    runtimeStore({
+      runtime: 'python',
+      kind: 'python-requests-ca-bundle',
+      combines: 'replaces',
+      locator: 'REQUESTS_CA_BUNDLE',
+      searched: ['REQUESTS_CA_BUNDLE'],
+      failure: 'no-certificates',
+    }),
+    runtimeStore({
+      runtime: 'python',
+      kind: 'python-certifi',
+      combines: 'standalone',
+      searched: ['/home/jdoe/.local/lib/python3.13'],
+      failure: 'not-found',
+    }),
+    runtimeStore({
+      runtime: 'java',
+      kind: 'java-cacerts',
+      combines: 'standalone',
+      locator: '/home/jdoe/jdk-17/lib/security/cacerts',
+      format: 'pkcs12',
+      failure: 'encrypted',
+    }),
+    runtimeStore({
+      runtime: 'java',
+      kind: 'java-cacerts',
+      combines: 'standalone',
+      locator: '/opt/jdk-8/jre/lib/security/cacerts',
+      format: 'jks',
+      pems: [publicRootPem, localRootPem],
+    }),
+    runtimeStore({
+      runtime: 'java',
+      kind: 'java-cacerts',
+      combines: 'standalone',
+      locator: '/opt/jdk-21/lib/security/cacerts',
+      failure: 'truncated',
+    }),
+  ];
+
+  // A chain terminating in the private root, one correlation of each strength.
+  const observedAnchors: readonly ObservedAnchor[] = [
+    {
+      der: localRootDer,
+      canonicalIssuer: 'cn=acme corp internal root,o=acme corp ltd',
+      canonicalSubject: 'cn=acme corp internal root,o=acme corp ltd',
+      host: 'api.example.com',
+      via: 'proxy',
+      anchorClass: 'private',
+    },
+    {
+      der: null,
+      canonicalIssuer: 'cn=acme corp internal root,o=acme corp ltd',
+      canonicalSubject: 'cn=api.example.com',
+      host: 'api.example.com',
+      via: 'direct',
+      anchorClass: 'indeterminate',
+    },
+  ];
+
+  return osShapes.flatMap((osStores) =>
+    [observedAnchors, []].flatMap((observed) =>
+      crossCheck({
+        platform: 'linux',
+        osStores,
+        runtimeStores,
+        runtimes: ['node', 'go', 'python', 'java'],
+        publicRootPems: [publicRootPem],
+        observedAnchors: observed,
+        osCommands: OS_TRUSTSTORE_COMMANDS,
+      }),
+    ),
+  );
+}
+
 describe('probe evidence kinds guardrail', () => {
   it('no engine probe-error finding carries text evidence from outside our own vocabulary', () => {
     const findings = HOSTILE_ERRORS.map((error) => probeErrorFinding('egress', error));
@@ -551,6 +804,45 @@ describe('probe evidence kinds guardrail', () => {
         .filter(({ evidence }) => evidence.kind !== 'dn' && evidence.kind !== 'public')
         .map(({ finding, evidence }) => `${finding.id}: ${evidence.label} is ${evidence.kind}`),
     ).toEqual([]);
+  });
+
+
+  it('no truststore finding carries text evidence from outside our own vocabulary', async () => {
+    const findings = await truststoreFindings();
+
+    expect(findings.length).toBeGreaterThan(0);
+    expect(offenders(findings)).toEqual([]);
+  });
+
+  /**
+   * The reason `dn` and `path` exist as kinds, restated for M4: an OS anchor's
+   * subject is the customer's own organisation name, and a runtime store's
+   * locator is a path inside their home directory. Both have to arrive under a
+   * kind redaction hashes - never `text`, which crosses the boundary in the
+   * clear.
+   */
+  it('never carries an anchor DN or a store path under a kind that would leak it', async () => {
+    const named = (await truststoreFindings())
+      .flatMap((finding) => finding.evidence.map((evidence) => ({ finding, evidence })))
+      .filter(
+        ({ evidence }) => /(^|,\s*)(CN|O|OU)=/.test(evidence.value) || /^(?:\/|[A-Z]:\\)/.test(evidence.value),
+      );
+
+    expect(named.length).toBeGreaterThan(0);
+    expect(
+      named
+        .filter(({ evidence }) => evidence.kind !== 'dn' && evidence.kind !== 'path' && evidence.kind !== 'public')
+        .map(({ finding, evidence }) => `${finding.id}: ${evidence.label} is ${evidence.kind}`),
+    ).toEqual([]);
+  });
+
+  it("accepts the trust-store reader's own codes and still rejects prose in one", () => {
+    for (const code of ['exit:1', 'signal:SIGKILL', 'run-signal', 'budget-exhausted', 'ENOENT']) {
+      expect(isAllowedText({ label: 'code', value: code, kind: 'text' })).toBe(true);
+    }
+    for (const hostile of ['exit: the store is busy', 'signal: killed by corp-av', 'Get-ChildItem failed']) {
+      expect(isAllowedText({ label: 'code', value: hostile, kind: 'text' })).toBe(false);
+    }
   });
 
   it('would reject a remote string that reached code evidence', () => {

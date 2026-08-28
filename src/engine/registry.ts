@@ -3,6 +3,7 @@ import { dnsProbe } from '../probes/dns/index.ts';
 import { egressProbe } from '../probes/egress/index.ts';
 import { proxyProbe } from '../probes/proxy/index.ts';
 import { tlsProbe } from '../probes/tls/index.ts';
+import { truststoreProbe } from '../probes/truststore/index.ts';
 
 /**
  * The probe registry.
@@ -18,6 +19,12 @@ import { tlsProbe } from '../probes/tls/index.ts';
  * and a reader meets the intermediary in the proxy findings before meeting the
  * certificate it presents.
  *
+ * `truststore` runs last, and has to: it reads the anchors `tls` observed off
+ * `ProbeContext` (ADR-0034), so a reader meets the chain the network presented
+ * before meeting the verdict on whether this machine's runtimes trust it. It is
+ * also the probe whose store read is budgeted out of what the run has left
+ * (ADR-0037), which only works if it is the one that goes last.
+ *
  * M1 registers `dns` and `egress`. M2 adds `proxy`. M3 `tls`, M4 `truststore`.
  */
-export const PROBES: readonly Probe[] = [dnsProbe, egressProbe, proxyProbe, tlsProbe];
+export const PROBES: readonly Probe[] = [dnsProbe, egressProbe, proxyProbe, tlsProbe, truststoreProbe];

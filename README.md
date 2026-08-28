@@ -18,14 +18,16 @@ actually reads, are M4. Binaries are unsigned until v2.
 
 ## What it checks today
 
-Four probes, run in that order: `dns` first, because a name that does not
+Five probes, run in that order: `dns` first, because a name that does not
 resolve makes every connection result downstream of it meaningless; `egress`
 second; `proxy` third, because its findings — an intermediary demanding auth, a
 PAC-discovered route — explain the `egress` blockers reported one probe
-earlier, so the reader sees the mechanism before the explanation; `tls` last,
+earlier, so the reader sees the mechanism before the explanation; `tls` fourth,
 for the same reason once more: it captures a chain through whichever proxy the
 environment names, and a reader should meet the intermediary before meeting the
-certificate it presents.
+certificate it presents. `truststore` last, because it reads the anchors `tls`
+observed and answers the question they raise: does anything on this machine
+actually trust them.
 
 **`dns`** resolves every host the profile names — once per distinct host, not
 once per endpoint — and reports:
@@ -136,6 +138,56 @@ skipped by `tls` entirely — no chain finding, of any severity, appears for it.
 Portcall has no way to know that 8443 speaks TLS until a profile says so, and
 dialling a handshake at a plaintext service would answer a question nobody
 asked.
+
+### `truststore`: what this machine trusts, and what your runtimes do
+
+**`truststore`** reads this machine's own trust store — the macOS keychains,
+the Windows machine root store, or the Linux CA bundle — and the store each
+runtime the profile declares actually consults, and reports the gap between
+them. That gap is the failure this whole tool exists for: a laptop where the
+corporate root is installed and `curl` works fine, and Node, Go, Python or Java
+fails, because none of them reads the OS store the way the browser does.
+
+- **`truststore.os.read`** names the store that was read, how many anchors it
+  holds, and how many of those are *locally added* — present on this machine
+  and absent from the runtime's own public list. Described factually and never
+  as "a corporate root": a public root merely newer than a runtime's bundled
+  snapshot lands in the same set, and the finding must not overstate.
+- **`truststore.<runtime>.missing-root`** — one clustered finding per store a
+  runtime consults, listing up to five subject DNs. `degraded` on its own;
+  **`blocker`** when the anchor correlates with one the `tls` probe watched
+  terminate a chain this run, with the match reported as `bytes` (proof) or
+  `issuer-name` (the weaker claim, when the peer sent no root at all). A
+  profile that tolerates interception does **not** soften it — that setting
+  says an inspecting proxy is expected, not that a root the runtime cannot
+  verify against is fine.
+- **`truststore.<runtime>.roots-present`**, **`.platform-verifier`** (Go on
+  macOS and Windows asks the OS itself, so there is nothing to compare),
+  **`.extra-ca-configured` / `.extra-ca-unreadable`** (a `NODE_EXTRA_CA_CERTS`
+  or `SSL_CERT_FILE` naming a file the runtime silently ignores — the failure
+  operators never find), **`.store-not-found`** listing where portcall looked,
+  and **`truststore.java.store-unreadable`** for a keystore it will not open.
+  Portcall never supplies a keystore password, not even the published default.
+- **`truststore.os.unreadable`**, **`truststore.os.read-timeout`** and
+  **`truststore.os.aborted`** are the three ways the read itself fails, and
+  they stay three findings because they are three different tickets. When
+  *none* of the stores could be read, portcall emits
+  `truststore.crosscheck.indeterminate` and **no verdict at all** — not the bad
+  one, and deliberately not the good one either. Absence of evidence must not
+  print as a green "roots present".
+
+The store read gets a fixed budget per store, cut down by whatever the run has
+left, and a store that outruns it is reported rather than waited for: the
+budget is the healthy read on that platform, never the sick environment's
+observed duration.
+
+**One Windows disclosure.** Enumerating the machine root store can make Windows
+itself contact `ctldl.windowsupdate.com` to refresh its certificate trust list.
+That is an OS behaviour triggered by reading the store, not a call portcall
+makes — portcall's own network allowlist is not involved and SPEC.md §4's rule
+about the calls *portcall* issues is not breached — but it is visible at a
+customer's egress, so it is stated here rather than discovered in a firewall
+log.
 
 ### Not yet: routing egress attempts through the discovered proxy
 
