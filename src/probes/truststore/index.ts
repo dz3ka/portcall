@@ -56,7 +56,6 @@ export async function runTruststore(
   const runtimeStores = await runtimeReader.read(runtimes, { env, platform, maxBytes: MAX_RUNTIME_STORE_BYTES });
 
   return crossCheck({
-    platform,
     osStores,
     runtimeStores,
     runtimes,

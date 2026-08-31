@@ -6,6 +6,7 @@ import { derToPem } from '../src/net/pem.ts';
 import type { RuntimeStoreOutcome, TrustStoreOutcome } from '../src/net/types.ts';
 import type { ObservedAnchor } from '../src/engine/index.ts';
 import type { Finding } from '../src/model/finding.ts';
+import { assertRemediable } from '../src/model/finding.ts';
 import { syntheticCert } from './helpers/synthetic-chain.ts';
 
 /**
@@ -91,7 +92,6 @@ function nodeBundle(pems: readonly string[]): RuntimeStoreOutcome {
 
 function input(overrides: Partial<CrossCheckInput> = {}): CrossCheckInput {
   return {
-    platform: 'linux',
     osStores: [osStore({ pems: [publicRootPem, localRootPem] })],
     runtimeStores: [nodeBundle([publicRootPem])],
     runtimes: ['node'],
@@ -292,7 +292,6 @@ describe('truststore cross-check', () => {
   it('says go asks the platform on win32 rather than inventing a missing root for it', () => {
     const findings = crossCheck(
       input({
-        platform: 'win32',
         runtimes: ['go'],
         runtimeStores: [
           runtimeStore('go', {
@@ -381,7 +380,6 @@ describe('truststore cross-check', () => {
   it('counts a root held by both macOS keychains once', () => {
     const findings = crossCheck(
       input({
-        platform: 'darwin',
         osStores: [
           osStore({
             kind: 'macos-system-roots',
@@ -425,7 +423,6 @@ describe('truststore cross-check', () => {
   it('counts locally added per store rather than run-wide', () => {
     const findings = crossCheck(
       input({
-        platform: 'darwin',
         osStores: [
           osStore({
             kind: 'macos-system-roots',
@@ -466,6 +463,28 @@ describe('truststore cross-check', () => {
 
   it('leaves the count off a store every block of which parsed', () => {
     expect(evidence(byId(crossCheck(input()), 'truststore.os.read'), 'unparsable certificates')).toEqual([]);
+  });
+
+  /**
+   * A malformed block is a fact about the store, not a fault of the runtime,
+   * so it rides on both the store's own finding *and* on a clean verdict
+   * built over it: `roots-present` is a claim about the anchors portcall
+   * could parse, and an unparsable block is not one of them.
+   */
+  it('carries an unparsable block on the read finding and on the clean verdict beside it', () => {
+    const findings = crossCheck(
+      input({
+        osStores: [osStore({ pems: [publicRootPem, UNPARSABLE_PEM] })],
+        runtimeStores: [nodeBundle([publicRootPem])],
+      }),
+    );
+
+    const read = byId(findings, 'truststore.os.read');
+    expect(evidence(read, 'unparsable certificates')).toEqual(['1']);
+    expect(read.remediation).toContain('did not parse as a certificate');
+
+    const present = byId(findings, 'truststore.node.roots-present');
+    expect(evidence(present, 'unparsable in OS store')).toEqual(['1']);
   });
 
   /**
@@ -521,6 +540,39 @@ describe('truststore cross-check', () => {
     ]);
     expect(evidence(byId(findings, 'truststore.java.missing-root'), 'runtime store read')).toEqual(['partial']);
   });
+
+  /**
+   * Severity narrowing (this WP): a byte-identical correlation is normally a
+   * `blocker`, but a set built from a store only part of which was read is
+   * not proof the unread half doesn't hold the anchor too - so `set.partial`
+   * caps it at `degraded`, the same as an uncorrelated finding, and the
+   * remediation tells the reader to confirm by hand before treating it as
+   * broken.
+   */
+  it('caps a correlated missing-root at degraded when the set behind it was only read in part', () => {
+    const findings = crossCheck(
+      input({
+        runtimes: ['java'],
+        runtimeStores: [
+          runtimeStore('java', {
+            kind: 'java-cacerts',
+            combines: 'standalone',
+            locator: '/opt/jdk-17/lib/security/cacerts',
+            format: 'pkcs12',
+            pems: [publicRootPem],
+            partial: true,
+          }),
+        ],
+        observedAnchors: [observed()],
+      }),
+    );
+
+    const missing = byId(findings, 'truststore.java.missing-root');
+    expect(missing.severity).toBe('degraded');
+    expect(evidence(missing, 'match')).toEqual(['bytes']);
+    expect(missing.remediation).toContain('keytool -list');
+    expect(missing.remediation).toContain('before treating this as broken');
+  });
 });
 
 describe('truststore cross-check, when the OS store could not be read', () => {
@@ -541,10 +593,76 @@ describe('truststore cross-check, when the OS store could not be read', () => {
       'truststore.crosscheck.indeterminate=unknown',
     ]);
     expect(findings.map((finding) => finding.id)).not.toContain('truststore.node.roots-present');
+    const unreadable = byId(findings, 'truststore.os.unreadable');
+    expect(evidence(unreadable, 'failure')).toEqual(['reader-missing']);
+    expect(unreadable.remediation).toContain('absolute path portcall');
+  });
+
+  /**
+   * The two macOS stores failing two different ways: one ran out of time and
+   * one ran and did not answer. Both get their own finding, naming their own
+   * store, and neither store was read, so the run is still indeterminate.
+   */
+  it('names the store that failed, distinctly from the one that timed out', () => {
+    const findings = crossCheck(
+      input({
+        osStores: [
+          osStore({
+            kind: 'macos-system-roots',
+            locator: '/System/Library/Keychains/SystemRootCertificates.keychain',
+            failure: 'timeout',
+            code: 'signal:SIGKILL',
+            budgetMs: 1_000,
+          }),
+          osStore({
+            kind: 'macos-admin-anchors',
+            locator: '/Library/Keychains/System.keychain',
+            failure: 'reader-failed',
+            code: 'exit:1',
+          }),
+        ],
+      }),
+    );
+
+    expect(verdict(findings)).toEqual([
+      'truststore.os.read-timeout=unknown',
+      'truststore.os.unreadable=unknown',
+      'truststore.crosscheck.indeterminate=unknown',
+    ]);
+    const unreadable = byId(findings, 'truststore.os.unreadable');
+    expect(evidence(unreadable, 'store')).toEqual(['macos-admin-anchors']);
+    expect(evidence(unreadable, 'store read')).toEqual(['/Library/Keychains/System.keychain']);
+  });
+
+  /**
+   * Property test over the whole failure union (Verify bullet): every failed
+   * store names itself somewhere in the findings, and every non-`ok` finding
+   * this cross-check emits carries a remediation `assertRemediable` accepts.
+   */
+  it('names every failed store and remediates every non-ok finding, across the whole failure union', () => {
+    const failures: readonly TrustStoreOutcome[] = [
+      osStore({ kind: 'macos-system-roots', failure: 'reader-missing', code: 'ENOENT' }),
+      osStore({ kind: 'macos-admin-anchors', failure: 'reader-failed', code: 'exit:1' }),
+      osStore({ kind: 'windows-machine-root', failure: 'output-too-large', code: 'signal:SIGKILL' }),
+      osStore({ kind: 'linux-ca-bundle', failure: 'no-certificates', code: null }),
+      osStore({ kind: 'windows-machine-root', locator: 'the machine root store', failure: 'timeout', code: 'signal:SIGKILL', budgetMs: 1_000 }),
+      osStore({ kind: 'macos-system-roots', failure: 'aborted', code: 'run-signal', budgetMs: 0 }),
+    ];
+
+    const findings = crossCheck(input({ osStores: failures }));
+
+    for (const store of failures) {
+      const kindEvidence = findings.flatMap((finding) => evidence(finding, 'store'));
+      expect(kindEvidence).toContain(store.kind);
+    }
+    for (const finding of findings) {
+      if (finding.severity === 'ok') continue;
+      expect(() => assertRemediable(finding)).not.toThrow();
+    }
   });
 
   it('says the platform has no reader rather than that its store is broken', () => {
-    const findings = crossCheck(input({ platform: 'freebsd', osStores: [] }));
+    const findings = crossCheck(input({ osStores: [] }));
 
     expect(verdict(findings)).toEqual([
       'truststore.os.unreadable=unknown',
@@ -565,19 +683,39 @@ describe('truststore cross-check, when the OS store could not be read', () => {
     expect(byId(findings, 'truststore.os.aborted').remediation).toContain('nothing here is a verdict about');
   });
 
-  it('carries the store counts on a verdict built from a partial read', () => {
+  /**
+   * The previously silent `partial` gap: the old aggregate only spoke up when
+   * *every* store failed, so a machine with one clean keychain and one broken
+   * one got a clean-looking report with no mention of the broken half at all.
+   * Per-store `truststore.os.unreadable` closes that gap - the failed store
+   * gets its own finding beside the clean one's, naming itself.
+   */
+  it('carries the store counts on a verdict built from a partial read, and says which store failed', () => {
     const findings = crossCheck(
       input({
-        platform: 'darwin',
         osStores: [
           osStore({ kind: 'macos-system-roots', pems: [publicRootPem, localRootPem] }),
-          osStore({ kind: 'macos-admin-anchors', failure: 'reader-failed', code: 'exit:1' }),
+          osStore({
+            kind: 'macos-admin-anchors',
+            locator: '/Library/Keychains/System.keychain',
+            failure: 'reader-failed',
+            code: 'exit:1',
+          }),
         ],
         runtimeStores: [nodeBundle([publicRootPem, localRootPem])],
       }),
     );
 
-    expect(verdict(findings)).toEqual(['truststore.os.read=ok', 'truststore.node.roots-present=ok']);
+    expect(verdict(findings)).toEqual([
+      'truststore.os.read=ok',
+      'truststore.os.unreadable=unknown',
+      'truststore.node.roots-present=ok',
+    ]);
+    const unreadable = byId(findings, 'truststore.os.unreadable');
+    expect(evidence(unreadable, 'store')).toEqual(['macos-admin-anchors']);
+    expect(evidence(unreadable, 'store read')).toEqual(['/Library/Keychains/System.keychain']);
+    expect(evidence(unreadable, 'failure')).toEqual(['reader-failed']);
+    expect(evidence(unreadable, 'code')).toEqual(['exit:1']);
     const present = byId(findings, 'truststore.node.roots-present');
     expect(evidence(present, 'stores read')).toEqual(['1']);
     expect(evidence(present, 'stores unread')).toEqual(['1']);
@@ -590,7 +728,6 @@ describe('truststore read-timeout remediation', () => {
   function timedOut(budgetMs: number, code: string): Finding {
     const findings = crossCheck(
       input({
-        platform: 'win32',
         osStores: [
           osStore({
             kind: 'windows-machine-root',

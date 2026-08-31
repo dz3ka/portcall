@@ -1,7 +1,13 @@
 import { X509Certificate } from '@peculiar/x509';
 import type { ObservedAnchor } from '../../engine/index.ts';
 import type { Evidence, Finding, Severity } from '../../model/finding.ts';
-import type { RuntimeStoreOutcome, TrustStoreCommand, TrustStoreKind, TrustStoreOutcome } from '../../net/types.ts';
+import type {
+  RuntimeStoreOutcome,
+  TrustStoreCommand,
+  TrustStoreFailure,
+  TrustStoreKind,
+  TrustStoreOutcome,
+} from '../../net/types.ts';
 import type { Runtime } from '../../profiles/schema.ts';
 import { canonicalDn, certificateIndex } from '../shared/root-index.ts';
 
@@ -35,7 +41,6 @@ import { canonicalDn, certificateIndex } from '../shared/root-index.ts';
  */
 
 export interface CrossCheckInput {
-  platform: NodeJS.Platform;
   osStores: readonly TrustStoreOutcome[];
   runtimeStores: readonly RuntimeStoreOutcome[];
   runtimes: readonly Runtime[];
@@ -224,6 +229,30 @@ export function osEvidenceLevel(osStores: readonly TrustStoreOutcome[]): OsEvide
   return read === osStores.length ? 'complete' : 'partial';
 }
 
+/**
+ * How much of this machine's trust store portcall saw, in the one shape
+ * `crossCheck` computes once and threads through - `runtimeFindings` used to
+ * recompute `read`/`unread` itself on every call, which is how a future edit
+ * to one copy silently stops matching the other.
+ */
+export interface OsCoverage {
+  level: OsEvidenceLevel;
+  read: number;
+  unread: number;
+  /** Run total, across every store - unlike `truststore.os.read`'s own count, which is per store. */
+  unparsed: number;
+}
+
+function osCoverage(
+  osStores: readonly TrustStoreOutcome[],
+  anchorsPerStore: ReadonlyMap<TrustStoreOutcome, StoreAnchors>,
+): OsCoverage {
+  const read = osStores.filter((store) => store.failure === null).length;
+  let unparsed = 0;
+  for (const parsed of anchorsPerStore.values()) unparsed += parsed.unparsed;
+  return { level: osEvidenceLevel(osStores), read, unread: osStores.length - read, unparsed };
+}
+
 /** The row's healthy-read ceiling for this store, or null when the table has no row for it. */
 function ceilingFor(kind: TrustStoreKind, commands: readonly TrustStoreCommand[]): number | null {
   return commands.find((command) => command.kind === kind)?.timeoutMs ?? null;
@@ -307,27 +336,130 @@ function readTimeoutFinding(store: TrustStoreOutcome, ceiling: number | null): F
   };
 }
 
-function unreadableFinding(evidence: Evidence[], unsupportedPlatform: boolean): Finding {
+/** Shared between the three "it ran and produced nothing usable" rows; the empty-store row differs. */
+const STORE_UNREADABLE_TITLE = 'Portcall could not read this machine’s trust store';
+const STORE_EMPTY_TITLE = 'Portcall read this machine’s trust store and it held no certificates';
+
+/**
+ * Why a store read produced nothing, one row per `TrustStoreFailure` a reader
+ * can actually emit (`timeout` and `aborted` have their own findings above;
+ * `unsupported-platform` is never assigned to a store - it is synthesised by
+ * `unsupportedPlatformFinding` from an *empty* `osStores` array). Four
+ * distinct remediations, because "the tool was not there to run" and "the
+ * tool ran and did not answer" send an operator to two different places, and
+ * "ran clean and held nothing" is not a read failure at all - CLAUDE.md's
+ * rule against collapsing operationally distinct errors, applied to a table
+ * instead of a switch (ADR-precedent: `probe-error.ts`'s
+ * `switch-exhaustiveness-check` note).
+ */
+const OS_READ_FAILURES: Readonly<
+  Record<Exclude<TrustStoreFailure, 'unsupported-platform' | 'timeout' | 'aborted'>, { title: string; remediation: string }>
+> = {
+  'reader-missing': {
+    title: STORE_UNREADABLE_TITLE,
+    remediation:
+      'The tool this platform lists certificates with was not there to run - the absolute path portcall ' +
+      'pins it to (ADR-0033) does not exist on this machine. Confirm it is installed where this platform ' +
+      'ships it, or list the store yourself with the platform’s certificate manager and send the output ' +
+      'with this report.',
+  },
+  'reader-failed': {
+    title: STORE_UNREADABLE_TITLE,
+    remediation:
+      'The tool this platform lists certificates with ran and did not answer - the code above says whether ' +
+      'it exited non-zero or was killed by a signal portcall did not send. Run the same listing yourself to ' +
+      'see what it reports, or list the store with the platform’s certificate manager and send the output ' +
+      'with this report.',
+  },
+  'output-too-large': {
+    title: STORE_UNREADABLE_TITLE,
+    remediation:
+      'This store’s listing exceeded the size portcall reads from a child process, and the child was killed ' +
+      'before it printed the rest, so nothing from it could be parsed. That is unusual for a trust store; ' +
+      'list it yourself with the platform’s certificate manager to see what is actually in it, and send the ' +
+      'output with this report.',
+  },
+  'no-certificates': {
+    title: STORE_EMPTY_TITLE,
+    remediation:
+      'Portcall read this store and it held no certificates at all, which is unusual for a trust store, so ' +
+      'the cross-check below has nothing to compare runtimes against for it. Confirm this is really the ' +
+      'store this machine verifies TLS connections against with the platform’s certificate manager - an ' +
+      'empty result more often means the wrong path than an empty machine.',
+  },
+};
+
+/**
+ * A store that failed for one of `OS_READ_FAILURES`' four reasons. Per store,
+ * never aggregated (ADR material this WP writes up): the suppression this
+ * replaces hid every runtime verdict behind one store that happened to fail
+ * first (session 24's live defect). Each row still names its own store, so a
+ * machine with five clean keychains and one broken one gets one finding
+ * naming the broken one, not five green verdicts withheld because of it.
+ */
+function unreadableFinding(store: TrustStoreOutcome): Finding {
+  const failure = store.failure;
+  // The caller (`osFindings`' switch) only reaches this branch after
+  // excluding null/timeout/aborted/unsupported-platform, so this narrows to
+  // exactly `OS_READ_FAILURES`'s four keys. The guard below is for the
+  // compiler, which only knows the field's full declared type - the same
+  // idiom `tls/evaluate.ts`'s `anchorOf` uses.
+  if (failure === null || failure === 'timeout' || failure === 'aborted' || failure === 'unsupported-platform') {
+    /* c8 ignore next */
+    throw new Error(`unreadableFinding called with a failure it does not cover: ${String(failure)}`);
+  }
+  const { title, remediation } = OS_READ_FAILURES[failure];
   return {
     id: 'truststore.os.unreadable',
     probe: PROBE,
     severity: 'unknown',
-    title: unsupportedPlatform
-      ? 'Portcall has no trust-store reader for this operating system'
-      : 'Portcall could not enumerate this machine’s trust store',
-    evidence,
-    remediation: unsupportedPlatform
-      ? 'Portcall reads the trust store on macOS, Windows and Linux, and this machine is none of ' +
-        'them, so it did not look rather than looking and finding nothing. The cross-check below ' +
-        'is missing its entire reference set: list this machine’s roots with whatever tool this ' +
-        'platform provides and compare them by hand against the runtime stores named below.'
-      : 'Portcall could not enumerate this machine’s trust store, so the cross-check below is ' +
-        'incomplete rather than clean. The failure class above says which half failed: a missing ' +
-        'reader means the tool this platform lists certificates with was not there to run, and a ' +
-        'failed one means it ran and did not answer. Re-run on a machine where that tool is ' +
-        'present, or list the store yourself with the platform’s certificate manager and send ' +
-        'the output with this report.',
+    title,
+    evidence: [
+      { label: 'store', value: store.kind, kind: 'text' },
+      { label: 'store read', value: store.locator, kind: 'path' },
+      { label: 'failure', value: failure, kind: 'text' },
+      { label: 'code', value: store.code ?? NO_CODE, kind: 'text' },
+    ],
+    remediation,
   };
+}
+
+/**
+ * The one case `unreadableFinding` cannot cover: no reader ran at all,
+ * because the platform is none of darwin, win32 or linux. `osStores` is then
+ * empty by `OsTrustStoreReader.read`'s own postcondition, so there is no
+ * per-store `failure` to report - this is the whole cross-check's reference
+ * set, missing.
+ */
+function unsupportedPlatformFinding(): Finding {
+  return {
+    id: 'truststore.os.unreadable',
+    probe: PROBE,
+    severity: 'unknown',
+    title: 'Portcall has no trust-store reader for this operating system',
+    evidence: [{ label: 'failure', value: 'unsupported-platform', kind: 'text' }],
+    remediation:
+      'Portcall reads the trust store on macOS, Windows and Linux, and this machine is none of ' +
+      'them, so it did not look rather than looking and finding nothing. The cross-check below ' +
+      'is missing its entire reference set: list this machine’s roots with whatever tool this ' +
+      'platform provides and compare them by hand against the runtime stores named below.',
+  };
+}
+
+/**
+ * What an operator does about a store that held blocks which never became an
+ * anchor: this is the same "counted, not dropped in silence" rule
+ * `StoreAnchors.unparsed`'s own doc gives, said out loud on the finding an
+ * operator actually reads.
+ */
+function unparsedRemediation(count: number): string {
+  return (
+    `This store held ${count} block${count === 1 ? '' : 's'} that did not parse as a certificate - a ` +
+    'malformed entry in this machine’s own trust store, not something portcall can fix. Every check ' +
+    'below is against the anchors that did parse; if the root you expect to find is missing from ' +
+    'them, it may be the one that failed to parse. List the store yourself with the platform’s ' +
+    'certificate manager to confirm.'
+  );
 }
 
 /**
@@ -347,83 +479,75 @@ function osFindings(
   const findings: Finding[] = [];
 
   for (const store of input.osStores) {
-    if (store.failure === null) {
-      const parsed = anchorsPerStore.get(store);
-      const anchors = parsed === undefined ? [] : [...parsed.anchors.values()];
-      const locallyAdded = anchors.filter((anchor) => locallyAddedKeys.has(derKey(anchor.der))).length;
-      findings.push({
-        id: 'truststore.os.read',
-        probe: PROBE,
-        severity: 'ok',
-        title: 'Read this machine’s trust store',
-        evidence: [
-          { label: 'store', value: store.kind, kind: 'text' },
-          { label: 'store read', value: store.locator, kind: 'path' },
-          { label: 'anchors', value: String(anchors.length), kind: 'number' },
-          { label: 'locally added', value: String(locallyAdded), kind: 'number' },
-          // Only when there were any: a zero on every clean read is noise, and
-          // a non-zero one is the difference between "this store holds two
-          // anchors" and "this store holds two portcall could read".
-          ...(parsed !== undefined && parsed.unparsed > 0
-            ? [{ label: 'unparsable certificates', value: String(parsed.unparsed), kind: 'number' as const }]
-            : []),
-        ],
-      });
-      continue;
-    }
-    if (store.failure === 'timeout') {
-      findings.push(readTimeoutFinding(store, ceilingFor(store.kind, input.osCommands)));
-      continue;
-    }
-    if (store.failure === 'aborted') {
-      findings.push({
-        id: 'truststore.os.aborted',
-        probe: PROBE,
-        severity: 'unknown',
-        title: 'The run ended before this machine’s trust store was read',
-        evidence: [
-          { label: 'store', value: store.kind, kind: 'text' },
-          { label: 'store read', value: store.locator, kind: 'path' },
-        ],
-        // Says nothing about the machine, deliberately: a cancelled run learned
-        // nothing about this store, and a remediation that blamed the
-        // environment would be a false statement about a customer's laptop.
-        remediation:
-          'The run was cancelled before this store was read, so nothing here is a verdict about ' +
-          'the store or about this machine - the read simply never happened. Re-run without ' +
-          'interrupting it, and with a larger --timeout if the run hit its own budget.',
-      });
+    switch (store.failure) {
+      case null: {
+        const parsed = anchorsPerStore.get(store);
+        const anchors = parsed === undefined ? [] : [...parsed.anchors.values()];
+        const locallyAdded = anchors.filter((anchor) => locallyAddedKeys.has(derKey(anchor.der))).length;
+        const unparsed = parsed === undefined ? 0 : parsed.unparsed;
+        findings.push({
+          id: 'truststore.os.read',
+          probe: PROBE,
+          severity: 'ok',
+          title: 'Read this machine’s trust store',
+          evidence: [
+            { label: 'store', value: store.kind, kind: 'text' },
+            { label: 'store read', value: store.locator, kind: 'path' },
+            { label: 'anchors', value: String(anchors.length), kind: 'number' },
+            { label: 'locally added', value: String(locallyAdded), kind: 'number' },
+            // Only when there were any: a zero on every clean read is noise, and
+            // a non-zero one is the difference between "this store holds two
+            // anchors" and "this store holds two portcall could read".
+            ...(unparsed > 0 ? [{ label: 'unparsable certificates', value: String(unparsed), kind: 'number' as const }] : []),
+          ],
+          ...(unparsed > 0 ? { remediation: unparsedRemediation(unparsed) } : {}),
+        });
+        continue;
+      }
+      case 'timeout':
+        findings.push(readTimeoutFinding(store, ceilingFor(store.kind, input.osCommands)));
+        continue;
+      case 'aborted':
+        findings.push({
+          id: 'truststore.os.aborted',
+          probe: PROBE,
+          severity: 'unknown',
+          title: 'The run ended before this machine’s trust store was read',
+          evidence: [
+            { label: 'store', value: store.kind, kind: 'text' },
+            { label: 'store read', value: store.locator, kind: 'path' },
+          ],
+          // Says nothing about the machine, deliberately: a cancelled run learned
+          // nothing about this store, and a remediation that blamed the
+          // environment would be a false statement about a customer's laptop.
+          remediation:
+            'The run was cancelled before this store was read, so nothing here is a verdict about ' +
+            'the store or about this machine - the read simply never happened. Re-run without ' +
+            'interrupting it, and with a larger --timeout if the run hit its own budget.',
+        });
+        continue;
+      case 'unsupported-platform':
+        // Never true of a real store: `types.ts`'s own doc says this value is
+        // synthesised by the probe from an *empty* `osStores` array, never
+        // assigned by a reader. Listed explicitly, doing nothing, so that
+        // `@typescript-eslint/switch-exhaustiveness-check` keeps every branch
+        // below this one - `OS_READ_FAILURES`'s four keys - honest rather than
+        // silently swallowed by a `default`.
+        continue;
+      case 'reader-missing':
+      case 'reader-failed':
+      case 'output-too-large':
+      case 'no-certificates':
+        findings.push(unreadableFinding(store));
+        continue;
     }
   }
 
-  // One aggregate finding, because "every store failed" is one fact about the
-  // platform rather than one per row. Timed-out and cancelled stores have their
-  // own ids above and are excluded from it on purpose: "re-run where the tool
-  // is available" is a lie about a machine where the tool ran, slowly, and
-  // about one where the operator pressed Ctrl-C.
-  const failed = input.osStores.filter(
-    (store) => store.failure !== null && store.failure !== 'timeout' && store.failure !== 'aborted',
-  );
-  const explainedElsewhere = input.osStores.some(
-    (store) => store.failure === 'timeout' || store.failure === 'aborted',
-  );
-  if (input.osStores.length === 0) {
-    // The reader's postcondition: an empty array is *exactly* a platform that
-    // is none of darwin, win32 or linux, and the probe is the only place that
-    // word is spoken (FLAG 1).
-    findings.push(unreadableFinding([{ label: 'failure', value: 'unsupported-platform', kind: 'text' }], true));
-  } else if (osEvidenceLevel(input.osStores) === 'none' && !explainedElsewhere && failed.length > 0) {
-    findings.push(
-      unreadableFinding(
-        failed.flatMap((store): Evidence[] => [
-          { label: 'store', value: store.kind, kind: 'text' },
-          { label: 'failure', value: store.failure ?? 'no-certificates', kind: 'text' },
-          { label: 'code', value: store.code ?? NO_CODE, kind: 'text' },
-        ]),
-        false,
-      ),
-    );
-  }
+  // The reader's postcondition: an empty array is *exactly* a platform that is
+  // none of darwin, win32 or linux, and the probe is the only place that word
+  // is spoken (FLAG 1). No aggregate for anything else any more - each failed
+  // store already named itself above, per store, per failure class.
+  if (input.osStores.length === 0) findings.push(unsupportedPlatformFinding());
 
   return findings;
 }
@@ -516,7 +640,15 @@ function correlate(missing: readonly Anchor[], observed: readonly ObservedAnchor
 
 // --- the runtime half ------------------------------------------------------
 
-function missingRootRemediation(runtime: Runtime, correlation: Correlation | null): string {
+/** Per runtime, how an operator lists a store by hand to confirm a finding built on a partial read. */
+const CONFIRM_LISTING_HINT: Readonly<Record<Runtime, string>> = {
+  node: 'the file NODE_EXTRA_CA_CERTS names',
+  go: 'the platform’s own certificate manager, or SSL_CERT_FILE/SSL_CERT_DIR if either is set',
+  python: 'the certifi bundle or REQUESTS_CA_BUNDLE named above',
+  java: '`keytool -list -keystore <path>`',
+};
+
+function missingRootRemediation(runtime: Runtime, correlation: Correlation | null, partial: boolean): string {
   const observed =
     correlation === null
       ? ''
@@ -527,10 +659,21 @@ function missingRootRemediation(runtime: Runtime, correlation: Correlation | nul
           'name, though the peer never sent the root itself - the match is by name and not by ' +
           'bytes, so confirm it before acting on it. ';
 
+  // Narrows the same claim `set.partial` narrows the severity for: a chain
+  // that matched a set built from an incomplete read is real evidence, but
+  // not evidence that survives an unread half turning out to hold the anchor
+  // after all - so before treating it as broken, list the store by hand.
+  const confirmPartial =
+    correlation !== null && partial
+      ? `This runtime’s store was only read in part, so confirm with ${CONFIRM_LISTING_HINT[runtime]} ` +
+        'before treating this as broken. '
+      : '';
+
   switch (runtime) {
     case 'node':
       return (
         observed +
+        confirmPartial +
         'Node does not read this machine’s OS trust store, so a root the machine trusts is ' +
         'invisible to it. Export the root named above from the store in the evidence - the ' +
         'platform’s own certificate manager will export it - and point Node at the file with ' +
@@ -541,6 +684,7 @@ function missingRootRemediation(runtime: Runtime, correlation: Correlation | nul
     case 'go':
       return (
         observed +
+        confirmPartial +
         'Go reads the file or directory SSL_CERT_FILE and SSL_CERT_DIR name rather than this ' +
         'machine’s OS trust store whenever either is set, and the set named above does not ' +
         'hold this root. Append the root to that file, or unset both variables on macOS and ' +
@@ -549,6 +693,7 @@ function missingRootRemediation(runtime: Runtime, correlation: Correlation | nul
     case 'python':
       return (
         observed +
+        confirmPartial +
         'requests and most Python HTTP clients read certifi’s bundle, not this machine’s OS ' +
         'store. Point them at the root with REQUESTS_CA_BUNDLE (or SSL_CERT_FILE for ssl and ' +
         'urllib), or append it to the certifi bundle named above.'
@@ -556,6 +701,7 @@ function missingRootRemediation(runtime: Runtime, correlation: Correlation | nul
     case 'java':
       return (
         observed +
+        confirmPartial +
         'This JDK’s cacerts does not contain the anchor above, so anything running on it will ' +
         'fail to verify. Import it with `keytool -importcert -cacerts -alias <name> -file ' +
         'root.pem` (JDK 9+), or point the JVM at a different store with the trustStore system ' +
@@ -584,7 +730,13 @@ function missingRootFinding(set: TrustSet, missing: readonly Anchor[], correlati
   // D4: a profile that tolerates interception does **not** soften this. That
   // setting says "an inspecting proxy is expected here", not "a root this
   // runtime cannot verify against is fine" - the runtime still fails.
-  const severity: Severity = correlation === null ? 'degraded' : 'blocker';
+  //
+  // Written inline rather than through `cap()`: `cap()`'s `required` means
+  // *profile* requiredness (ADR-0029), and this narrowing is about evidence
+  // completeness instead - a chain observed against a set built from an
+  // incomplete read is real, but not proof strong enough to call a blocker
+  // when the unread half of that same set could hold the anchor after all.
+  const severity: Severity = correlation === null || set.partial ? 'degraded' : 'blocker';
 
   return {
     id: RUNTIME_IDS[set.runtime].missingRoot,
@@ -595,20 +747,25 @@ function missingRootFinding(set: TrustSet, missing: readonly Anchor[], correlati
         ? 'This runtime does not trust a root this machine trusts'
         : 'This runtime does not trust the root that terminated a chain it was served',
     evidence,
-    remediation: missingRootRemediation(set.runtime, correlation),
+    remediation: missingRootRemediation(set.runtime, correlation, set.partial),
   };
 }
 
-function rootsPresentFinding(set: TrustSet, level: OsEvidenceLevel, read: number, unread: number): Finding {
+function rootsPresentFinding(set: TrustSet, coverage: OsCoverage): Finding {
   const evidence: Evidence[] = [];
   if (set.locator !== null) evidence.push({ label: 'runtime store', value: set.locator, kind: 'path' });
   evidence.push({ label: 'anchors checked', value: String(set.pems.length), kind: 'number' });
   // Under `partial` the claim is narrower than it reads, so the counts travel
   // with it: this set holds every anchor portcall *could read*, and the unread
   // store's own finding sits beside this one saying what it could not.
-  if (level === 'partial') {
-    evidence.push({ label: 'stores read', value: String(read), kind: 'number' });
-    evidence.push({ label: 'stores unread', value: String(unread), kind: 'number' });
+  if (coverage.level === 'partial') {
+    evidence.push({ label: 'stores read', value: String(coverage.read), kind: 'number' });
+    evidence.push({ label: 'stores unread', value: String(coverage.unread), kind: 'number' });
+  }
+  // Same reason `truststore.os.read` carries the count: this "every root is
+  // trusted" claim is only as good as what portcall could parse, run-wide.
+  if (coverage.unparsed > 0) {
+    evidence.push({ label: 'unparsable in OS store', value: String(coverage.unparsed), kind: 'number' });
   }
   return {
     id: RUNTIME_IDS[set.runtime].rootsPresent,
@@ -756,7 +913,7 @@ function runtimeFindings(
   outcomes: readonly RuntimeStoreOutcome[],
   locallyAdded: readonly Anchor[],
   input: CrossCheckInput,
-  level: OsEvidenceLevel,
+  coverage: OsCoverage,
 ): Finding[] {
   const findings: Finding[] = [];
 
@@ -799,10 +956,7 @@ function runtimeFindings(
   // The load-bearing suppression (ADR-0037): with no OS store read the
   // locally-added set is *undefined*, and a `roots-present` built on an
   // undefined set is a green finding standing on no evidence at all.
-  if (level === 'none') return findings;
-
-  const read = input.osStores.filter((store) => store.failure === null).length;
-  const unread = input.osStores.length - read;
+  if (coverage.level === 'none') return findings;
 
   for (const set of sets) {
     const index = certificateIndex([...set.pems]);
@@ -811,12 +965,13 @@ function runtimeFindings(
       findings.push(missingRootFinding(set, missing, correlate(missing, input.observedAnchors)));
       continue;
     }
-    // The same suppression `level === 'none'` performs above, one store down:
-    // "this runtime trusts every root this machine adds" is a claim about the
-    // whole set, and a set assembled from a store read in part is not the whole
-    // set. The unread entries could hold anything, so the honest answer is the
-    // store's own `store-unreadable` finding and no verdict here.
-    if (!set.partial) findings.push(rootsPresentFinding(set, level, read, unread));
+    // The same suppression `coverage.level === 'none'` performs above, one
+    // store down: "this runtime trusts every root this machine adds" is a
+    // claim about the whole set, and a set assembled from a store read in
+    // part is not the whole set. The unread entries could hold anything, so
+    // the honest answer is the store's own `store-unreadable` finding and no
+    // verdict here.
+    if (!set.partial) findings.push(rootsPresentFinding(set, coverage));
   }
   return findings;
 }
@@ -849,15 +1004,15 @@ export function crossCheck(input: CrossCheckInput): Finding[] {
     .filter((anchor) => !publicIndex.hasCertificate(anchor.der))
     .sort(byCanonicalSubject);
 
-  const level = osEvidenceLevel(input.osStores);
+  const coverage = osCoverage(input.osStores, anchorsPerStore);
   const findings = osFindings(input, anchorsPerStore, new Set(locallyAdded.map((anchor) => derKey(anchor.der))));
 
   for (const runtime of input.runtimes) {
     const outcomes = input.runtimeStores.filter((outcome) => outcome.runtime === runtime);
-    findings.push(...runtimeFindings(runtime, outcomes, locallyAdded, input, level));
+    findings.push(...runtimeFindings(runtime, outcomes, locallyAdded, input, coverage));
   }
 
-  if (level === 'none') {
+  if (coverage.level === 'none') {
     findings.push({
       id: 'truststore.crosscheck.indeterminate',
       probe: PROBE,

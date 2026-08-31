@@ -653,7 +653,6 @@ async function truststoreFindings(): Promise<Finding[]> {
   return osShapes.flatMap((osStores) =>
     [observedAnchors, []].flatMap((observed) =>
       crossCheck({
-        platform: 'linux',
         osStores,
         runtimeStores,
         runtimes: ['node', 'go', 'python', 'java'],
