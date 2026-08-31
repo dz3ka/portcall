@@ -77,3 +77,4 @@ Numbering is sequential at creation (`NNNN-kebab-title.md`). Status is one of:
 | [0029](0029-interception-severity-is-decided-once-in-the-trust-verdict.md) | Interception severity is decided once, in the trust verdict | Accepted |
 | [0030](0030-the-harness-zone-is-ipv4-only-and-aaaa-is-unanswered.md) | The harness zone is IPv4-only, and AAAA is left unanswered | Accepted |
 | [0031](0031-cross-runtime-parity-is-a-verdict-claim-not-a-bundle-claim.md) | Cross-runtime parity is a verdict claim, not a bundle claim | Accepted |
+| [0032](0032-per-store-os-unreadable-not-one-aggregate.md) | An unreadable OS store gets its own finding, not a shared aggregate | Accepted |
