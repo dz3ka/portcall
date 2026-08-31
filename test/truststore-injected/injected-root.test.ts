@@ -121,12 +121,6 @@ beforeAll(async () => {
   // against the actual store contents rather than trusted from the findings'
   // own summary counts.
   const osOutcomes = await osTrustStoreReader.read({ signal: context.signal, deadline: context.deadline });
-  for (const store of osOutcomes) {
-    console.log(
-      `os store ${store.kind} on ${process.platform}: failure=${String(store.failure)} code=${String(store.code)} ` +
-        `budgetMs=${String(store.budgetMs)} anchors=${store.pems.length}`,
-    );
-  }
   const publicIndex = certificateIndex(PUBLIC_ROOT_CA_PEMS);
   const seen = new Set<string>();
   locallyAddedSha256 = new Set();
