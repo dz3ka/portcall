@@ -88,7 +88,7 @@ const COMMAND_TABLE: readonly TrustStoreCommand[] = [
     ],
     locator: 'Cert:\\LocalMachine\\Root',
     format: 'base64-der-lines',
-    timeoutMs: 30_000,
+    timeoutMs: 5_000,
   },
 ];
 
@@ -281,7 +281,6 @@ export function readOneStore(
     let received = 0;
     let settled = false;
     let killed: Killed | null = null;
-    const startedAt = Date.now();
 
     const child = spawn(command.file, [...command.argv], {
       shell: false,
@@ -314,9 +313,6 @@ export function readOneStore(
       settled = true;
       clearTimeout(timer);
       options.signal.removeEventListener('abort', onAbort);
-      if (command.kind === 'windows-machine-root') {
-        process.stderr.write(`WP7-BUG2-MEASURE windows-machine-root elapsedMs=${String(Date.now() - startedAt)}\n`);
-      }
       resolve(outcome(failure, code, pems));
     };
 
