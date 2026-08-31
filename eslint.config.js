@@ -44,7 +44,15 @@ export default tseslint.config(
     // the typed program and do not ship in the binary. They still run on Node,
     // so `no-undef` needs Node's globals declared — `nodeBuiltin` and not `node`
     // because these are ESM and have no `require`/`__dirname`.
-    files: ['scripts/**/*.mjs', 'eslint.config.js', 'vitest.config.ts'],
+    files: [
+      'scripts/**/*.mjs',
+      // The three-OS proof's own root generator (M4, WP7): a CI step run
+      // directly by `node`, same as the build scripts above, and not part of
+      // the typed program for the same reason.
+      'test/truststore-injected/generate-root.mjs',
+      'eslint.config.js',
+      'vitest.config.ts',
+    ],
     ...tseslint.configs.disableTypeChecked,
     languageOptions: {
       // Merge, don't replace: `disableTypeChecked` sets parserOptions of its own

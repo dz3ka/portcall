@@ -42,6 +42,64 @@ jobs:
       - name: verify (profiles:check, lint, typecheck, test)
         run: npm run verify
 
+  truststore-proof:
+    # The claim `truststore.node.missing-root` makes - "this machine trusts a
+    # root Node does not" - proven against a *real* injected root on each real
+    # OS, not a fixture (M4, WP7, SPEC.md §7). A dedicated job, not a step
+    # inside `verify`: a red `truststore-proof (macos-latest)` names the exact
+    # claim that broke, where a red `verify (macos-latest)` would not
+    # distinguish "the probe is wrong" from "eslint is unhappy" on that runner.
+    #
+    # The injected root is a throwaway, generated fresh by
+    # `generate-root.mjs` on every run (test/helpers/synthetic-chain.ts, no
+    # openssl, no vendored key) and mutates only this disposable runner's
+    # machine trust store - never this repo's working directory, and never a
+    # developer's own machine (CLAUDE.md's no-config-mutation rule is about the
+    # tool under test, not this harness).
+    strategy:
+      fail-fast: false # a Windows-only failure must not hide a macOS one
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # `${{ runner.temp }}` rather than the raw `RUNNER_TEMP` env var name:
+      # GitHub sets the context expression identically under bash and pwsh
+      # steps, where the env var's own shell syntax would differ
+      # ($RUNNER_TEMP vs $env:RUNNER_TEMP).
+      - name: generate the throwaway root and export its SHA-256
+        # shell: bash is required here - the Windows runner's default shell is
+        # pwsh, where bare `$GITHUB_ENV` is an unset local variable (not the
+        # env var) and `>> "$GITHUB_ENV"` silently redirects to nowhere,
+        # leaving PORTCALL_TEST_ROOT_SHA256 unset and the gate permanently
+        # throwing on that leg. bash (Git Bash, present on GitHub-hosted
+        # Windows runners) expands $GITHUB_ENV correctly on all three OSes.
+        shell: bash
+        run: node test/truststore-injected/generate-root.mjs "${{ runner.temp }}" >> "$GITHUB_ENV"
+      # Three injection commands, one per OS - the whole reason this job is a
+      # matrix rather than one Linux run. Each step is gated to its own OS so
+      # the log for a given runner shows exactly the command that ran on it.
+      - name: inject the root (ubuntu - update-ca-certificates)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo cp "${{ runner.temp }}/root.pem" /usr/local/share/ca-certificates/portcall-m4.crt
+          sudo update-ca-certificates
+      - name: inject the root (macos - security add-trusted-cert)
+        if: matrix.os == 'macos-latest'
+        run: |
+          sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "${{ runner.temp }}/root.cer"
+      - name: inject the root (windows - Import-Certificate)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: Import-Certificate -FilePath "${{ runner.temp }}\root.cer" -CertStoreLocation Cert:\LocalMachine\Root
+      - name: npm run test:truststore (against the real, injected trust store)
+        run: npm run test:truststore
+
   node-compat:
     # Only the majors package.json claims to support (engines.node >=22.6.0).
     # Node 20 is deliberately absent: a green run on a version the package

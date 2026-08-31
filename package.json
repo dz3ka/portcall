@@ -37,6 +37,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:truststore": "vitest run --config vitest.truststore.config.ts",
     "verify": "npm run profiles:check && npm run lint && npm run typecheck && npm run test"
   },
   "dependencies": {
