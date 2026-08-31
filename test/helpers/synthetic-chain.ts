@@ -1,5 +1,13 @@
 import type { webcrypto } from 'node:crypto';
-import { SubjectAlternativeNameExtension, X509Certificate, X509CertificateGenerator, cryptoProvider } from '@peculiar/x509';
+import {
+  BasicConstraintsExtension,
+  KeyUsageFlags,
+  KeyUsagesExtension,
+  SubjectAlternativeNameExtension,
+  X509Certificate,
+  X509CertificateGenerator,
+  cryptoProvider,
+} from '@peculiar/x509';
 
 /**
  * Synthetic certificate chains for the `tls` evaluation tests.
@@ -40,6 +48,14 @@ export interface SyntheticCertSpec {
   notAfter?: Date;
   /** dNSName SAN entries. Omitted entirely when absent, so "no SAN extension" is expressible. */
   dnsNames?: readonly string[];
+  /**
+   * Marks the certificate as a CA (Basic Constraints, critical) with
+   * keyCertSign/cRLSign Key Usage (critical). A real OS trust store's anchor
+   * import rejects a self-signed root lacking these - the evaluation layer
+   * under test never checks them (ADR-0021), so every other synthetic cert
+   * omits them and this defaults to false.
+   */
+  isCA?: boolean;
 }
 
 const DEFAULT_NOT_BEFORE = new Date('2020-01-01T00:00:00Z');
@@ -60,10 +76,17 @@ export async function syntheticCert(spec: SyntheticCertSpec): Promise<Uint8Array
     signingKey: privateKey,
     publicKey,
     signingAlgorithm: ALGORITHM,
-    extensions:
-      spec.dnsNames === undefined
+    extensions: [
+      ...(spec.dnsNames === undefined
         ? []
-        : [new SubjectAlternativeNameExtension(spec.dnsNames.map((value) => ({ type: 'dns' as const, value })))],
+        : [new SubjectAlternativeNameExtension(spec.dnsNames.map((value) => ({ type: 'dns' as const, value })))]),
+      ...(spec.isCA === true
+        ? [
+            new BasicConstraintsExtension(true, undefined, true),
+            new KeyUsagesExtension(KeyUsageFlags.keyCertSign | KeyUsageFlags.cRLSign, true),
+          ]
+        : []),
+    ],
   });
   return new Uint8Array(cert.rawData);
 }

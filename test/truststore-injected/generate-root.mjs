@@ -48,6 +48,11 @@ const der = await syntheticCert({
   // dates are what the `tls` evaluation tests are for, not this one.
   notBefore: new Date('2020-01-01T00:00:00Z'),
   notAfter: new Date('2035-01-01T00:00:00Z'),
+  // A real OS trust store's anchor import (macOS `security add-trusted-cert`
+  // in particular) rejects a self-signed root with no Basic Constraints
+  // CA:true / Key Usage keyCertSign - this is an actual trust anchor, not a
+  // leaf under evaluation, so it needs them.
+  isCA: true,
 });
 
 const sha256 = createHash('sha256').update(der).digest('hex');
