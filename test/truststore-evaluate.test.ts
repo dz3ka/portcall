@@ -416,6 +416,43 @@ describe('truststore cross-check', () => {
   });
 
   /**
+   * Bug 4: `missingRootFinding` used to slice `missing` to `MAX_REPORTED_DNS`
+   * before looking at correlation, so a locally-added anchor with live
+   * evidence against it - the exact chain the `tls` probe watched terminate -
+   * could still lose to five alphabetically-earlier anchors with no evidence
+   * at all. Six locally-added roots, alphabetically A through F, with the
+   * observed anchor tied by bytes to the one that sorts last: the correlated
+   * root must survive the truncation, and the DN order stays otherwise
+   * unchanged (correlated root first, then the alphabetical remainder).
+   */
+  it('keeps a correlated anchor in the DN list even when it sorts alphabetically last', async () => {
+    const subjects = [
+      'CN=Acme Corp Root A',
+      'CN=Acme Corp Root B',
+      'CN=Acme Corp Root C',
+      'CN=Acme Corp Root D',
+      'CN=Acme Corp Root E',
+    ];
+    const correlatedSubject = 'CN=Acme Corp Root F';
+    const [ders, correlatedDer] = await Promise.all([
+      Promise.all(subjects.map((subject) => syntheticCert({ subject }))),
+      syntheticCert({ subject: correlatedSubject }),
+    ]);
+    const pems = ders.map((der) => derToPem(der));
+
+    const findings = crossCheck(
+      input({
+        osStores: [osStore({ pems: [publicRootPem, ...pems, derToPem(correlatedDer)] })],
+        observedAnchors: [observed({ der: correlatedDer })],
+      }),
+    );
+
+    const missing = byId(findings, 'truststore.node.missing-root');
+    expect(evidence(missing, 'missing anchors')).toEqual(['6']);
+    expect(evidence(missing, 'anchor')).toEqual([correlatedSubject, ...subjects.slice(0, 4)]);
+  });
+
+  /**
    * `locally added` sits on a *per-store* finding, so it counts that store: the
    * run-wide deduplicated total printed under a store holding one anchor reads
    * as a subset larger than the set it sits inside.

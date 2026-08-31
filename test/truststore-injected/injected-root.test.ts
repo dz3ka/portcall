@@ -167,6 +167,26 @@ describe('the injected root, read from the real OS trust store', () => {
     const missing = findingsById(findings, 'truststore.node.missing-root');
     const dnEntries = missing.flatMap((finding) => finding.evidence.filter((entry) => entry.kind === 'dn'));
     expect(dnEntries.length).toBeGreaterThan(0);
+
+    // `MAX_REPORTED_DNS` caps the DN list this finding carries (evaluate.ts),
+    // and this suite never runs the `tls` probe - `observedAnchors` is `[]` in
+    // the `ProbeContext` above - so `correlate()` always returns `null` here
+    // and Bug 4's fix (a correlated anchor jumping the truncation) has nothing
+    // to correlate against. On a machine with enough other locally-added
+    // anchors (CI's macOS keychains routinely have more than five), the
+    // injected root can still be truncated out of this list with no evidence
+    // able to save it. `total` is the same count the finding itself already
+    // publishes as `missing anchors`; when the DN list is not truncated
+    // against it, the injected root must be named. When it is truncated, the
+    // OS-read edge this file exists to prove is already covered by "is among
+    // the locally-added anchors the probe observed" above - the root's own
+    // sha256 in `locallyAddedSha256` - and no assertion is made on DN content.
+    const total = missing.reduce((sum, finding) => {
+      const count = finding.evidence.find((entry) => entry.label === 'missing anchors');
+      return sum + (count === undefined ? 0 : Number(count.value));
+    }, 0);
+    if (dnEntries.length !== total) return;
+
     expect(dnEntries.some((entry) => entry.value.includes('Portcall M4 Injected Test Root'))).toBe(true);
   });
 

@@ -609,6 +609,8 @@ type MatchStrength = 'bytes' | 'issuer-name';
 interface Correlation {
   anchor: ObservedAnchor;
   match: MatchStrength;
+  /** The `missing` anchor this correlation ties to, so it can be moved ahead of the `MAX_REPORTED_DNS` truncation (Bug 4). */
+  matched: Anchor;
 }
 
 /**
@@ -618,9 +620,11 @@ interface Correlation {
  * root at all, and it is reported as the weaker claim rather than rounded up.
  */
 function correlate(missing: readonly Anchor[], observed: readonly ObservedAnchor[]): Correlation | null {
-  const keys = new Set(missing.map((anchor) => derKey(anchor.der)));
+  const byDerKey = new Map(missing.map((anchor) => [derKey(anchor.der), anchor]));
   for (const anchor of observed) {
-    if (anchor.der !== null && keys.has(derKey(anchor.der))) return { anchor, match: 'bytes' };
+    if (anchor.der === null) continue;
+    const matched = byDerKey.get(derKey(anchor.der));
+    if (matched !== undefined) return { anchor, match: 'bytes', matched };
   }
   // The name-only pass keys on `private`, and only it. `indeterminate` is the
   // `tls` probe saying it could not tell a private anchor from a public one -
@@ -629,11 +633,11 @@ function correlate(missing: readonly Anchor[], observed: readonly ObservedAnchor
   // that merely matches a maybe is not evidence that this chain is the one
   // failing, and must not carry a missing root up to `blocker`. The byte pass
   // above needs no such filter: byte identity is proof whatever it was graded.
-  const subjects = new Set(missing.map((anchor) => anchor.canonicalSubject));
+  const bySubject = new Map(missing.map((anchor) => [anchor.canonicalSubject, anchor]));
   for (const anchor of observed) {
-    if (anchor.anchorClass === 'private' && subjects.has(anchor.canonicalIssuer)) {
-      return { anchor, match: 'issuer-name' };
-    }
+    if (anchor.anchorClass !== 'private') continue;
+    const matched = bySubject.get(anchor.canonicalIssuer);
+    if (matched !== undefined) return { anchor, match: 'issuer-name', matched };
   }
   return null;
 }
@@ -713,7 +717,16 @@ function missingRootRemediation(runtime: Runtime, correlation: Correlation | nul
 /** One clustered finding per trust set, never one per anchor: a set is one ticket. */
 function missingRootFinding(set: TrustSet, missing: readonly Anchor[], correlation: Correlation | null): Finding {
   const evidence: Evidence[] = [{ label: 'missing anchors', value: String(missing.length), kind: 'number' }];
-  for (const anchor of missing.slice(0, MAX_REPORTED_DNS)) {
+  // Bug 4: the correlated anchor - the one a live chain actually tied to this
+  // broken store - goes to the front before the report caps out at
+  // `MAX_REPORTED_DNS`, so it is never silently outvoted by alphabetically
+  // earlier anchors that carry no evidence at all. Everything else keeps its
+  // alphabetical order.
+  const ordered =
+    correlation === null
+      ? missing
+      : [correlation.matched, ...missing.filter((anchor) => anchor !== correlation.matched)];
+  for (const anchor of ordered.slice(0, MAX_REPORTED_DNS)) {
     evidence.push({ label: 'anchor', value: anchor.subject, kind: 'dn' });
   }
   if (set.locator !== null) evidence.push({ label: 'runtime store', value: set.locator, kind: 'path' });
