@@ -23,10 +23,13 @@ import { syntheticCert } from '../../../helpers/synthetic-chain.ts';
  * It is **not a recording**. Nothing here was copied off a machine. The PEM
  * bodies are self-signed certificates minted by this repo's own
  * `syntheticCert` helper under a throwaway key, with DNs that say so; the
- * `cacerts` files are ASCII placeholders and deliberately not keystores,
- * because WP3 only *locates* a keystore (it returns `unsupported-format` until
- * the reader lands) and a hand-authored keystore would be the guess-committed-
- * as-a-fixture that `record-stores.ts` forbids.
+ * `cacerts` files are ASCII placeholders and deliberately not keystores: this
+ * tree only exercises *discovery* (where a runtime would look), so these
+ * files correctly resolve to `unsupported-format` once read. The container
+ * reader itself (WP4, `src/net/java-keystore.ts`) is tested against bytes
+ * built in-process by `test/helpers/jks-writer.ts` / `pkcs12-writer.ts` -
+ * committing a hand-authored keystore here would be the guess-committed-as-a-
+ * fixture that `record-stores.ts` forbids.
  *
  * No private key is written by this script or committed beside it. Portcall
  * never reads one (SPEC.md 4.2), so its fixtures do not contain one either.
@@ -59,7 +62,8 @@ write('virtualenv-win/Lib/site-packages/certifi/cacert.pem', await anchor('Certi
 // A per-user certifi, found by glob under HOME rather than by an env var.
 write('home/.local/lib/python3.13/site-packages/certifi/cacert.pem', await anchor('Certifi User Root'));
 
-// JDK 9+ and JDK 8 layouts. Located, never opened, until the keystore reader lands.
+// JDK 9+ and JDK 8 layouts. Located here, but this placeholder is not a real
+// keystore, so `readKeystore` correctly reports `unsupported-format` on it.
 write('java-home-9/lib/security/cacerts', PLACEHOLDER_KEYSTORE);
 write('java-home-8/jre/lib/security/cacerts', PLACEHOLDER_KEYSTORE);
 

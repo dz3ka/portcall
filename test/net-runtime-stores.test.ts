@@ -373,7 +373,9 @@ describe('java', () => {
     const cacerts = one(await read(['java'], NO_TABLE, { JAVA_HOME: fixture('java-home-9') }), 'java-cacerts');
     samePath(cacerts.locator, fixture('java-home-9', 'lib', 'security', 'cacerts'));
     expect(cacerts.combines).toBe('standalone');
-    // WP3 locates the store. The keystore reader is what turns it into PEMs.
+    // The fixture's `cacerts` is an ASCII placeholder (make-tree.ts), not a real
+    // keystore, so `readKeystore` correctly rejects it on the magic bytes alone -
+    // the container reader itself is exercised in test/net-java-keystore.test.ts.
     expect(cacerts.failure).toBe('unsupported-format');
     expect(cacerts.pems).toEqual([]);
     expect(cacerts.format).toBeNull();

@@ -1,7 +1,8 @@
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { posix as posixPath, win32 as win32Path } from 'node:path';
+import { readKeystore } from './java-keystore.ts';
 import { LINUX_CA_BUNDLE_PATHS } from './os-truststore.ts';
-import { pemBlocks } from './pem.ts';
+import { derToPem, pemBlocks } from './pem.ts';
 import { PUBLIC_ROOT_CA_PEMS } from './root-bundle.ts';
 import type { Runtime } from '../profiles/schema.ts';
 import type { RuntimeStoreFailure, RuntimeStoreOutcome, RuntimeStoreReader } from './types.ts';
@@ -397,15 +398,48 @@ async function certifiStores(lookup: Lookup): Promise<RuntimeStoreOutcome[]> {
   return outcomes;
 }
 
+interface KeystoreContents {
+  pems: readonly string[];
+  format: 'jks' | 'pkcs12' | null;
+  partial: boolean;
+  failure: RuntimeStoreFailure | null;
+  code: string | null;
+}
+
 /**
- * `JAVA_HOME` first (JDK 9+, then the JDK 8 layout), then the platform's table.
- *
- * The bytes are not parsed here: WP4's keystore reader is what turns a
- * `cacerts` into PEMs, so until it lands a located store reports
- * `unsupported-format`, which is honest - portcall found the file and cannot
- * yet say what is in it - and is the one placeholder a reader of this file
- * should expect to disappear.
+ * One `cacerts`, size-checked the same way `readPemFile` is, then handed to
+ * `java-keystore.ts`'s `readKeystore`. `KeystoreFailure` and
+ * `RuntimeStoreFailure` share the same five container-reader values on
+ * purpose (D8/3.1), so the mapping here is a pass-through rather than a
+ * translation - there is no case where a keystore reason has to be renamed or
+ * collapsed to fit this outcome's vocabulary.
  */
+async function readJavaCacerts(path: string, maxBytes: number): Promise<KeystoreContents> {
+  let size: number;
+  try {
+    size = (await stat(path)).size;
+  } catch (error) {
+    const code = errnoCode(error);
+    return { pems: [], format: null, partial: false, failure: code === 'ENOENT' ? 'not-found' : 'unreadable', code };
+  }
+  if (size > maxBytes) return { pems: [], format: null, partial: false, failure: 'output-too-large', code: null };
+  let bytes: Uint8Array;
+  try {
+    bytes = new Uint8Array(await readFile(path));
+  } catch (error) {
+    return { pems: [], format: null, partial: false, failure: 'unreadable', code: errnoCode(error) };
+  }
+  const read = readKeystore(bytes);
+  return {
+    pems: read.certificates.map((der) => derToPem(der)),
+    format: read.format,
+    partial: read.partial,
+    failure: read.failure,
+    code: null,
+  };
+}
+
+/** `JAVA_HOME` first (JDK 9+, then the JDK 8 layout), then the platform's table. Each hit's bytes go to `readKeystore`. */
 async function javaStores(lookup: Lookup): Promise<RuntimeStoreOutcome[]> {
   const kind = 'java-cacerts';
   const javaHome = envValue(lookup.env, 'JAVA_HOME');
@@ -430,25 +464,8 @@ async function javaStores(lookup: Lookup): Promise<RuntimeStoreOutcome[]> {
 
   const outcomes: RuntimeStoreOutcome[] = [];
   for (const path of capped(found)) {
-    let size: number;
-    try {
-      size = (await stat(path)).size;
-    } catch (error) {
-      const code = errnoCode(error);
-      outcomes.push(
-        outcome('java', { kind, combines: 'standalone', locator: path, searched: [path], failure: 'unreadable', code }),
-      );
-      continue;
-    }
-    outcomes.push(
-      outcome('java', {
-        kind,
-        combines: 'standalone',
-        locator: path,
-        searched: [path],
-        failure: size > lookup.maxBytes ? 'output-too-large' : 'unsupported-format',
-      }),
-    );
+    const contents = await readJavaCacerts(path, lookup.maxBytes);
+    outcomes.push(outcome('java', { kind, combines: 'standalone', locator: path, searched: [path], ...contents }));
   }
   return outcomes;
 }
