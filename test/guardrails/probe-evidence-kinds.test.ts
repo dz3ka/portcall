@@ -181,6 +181,7 @@ const RUNTIME_STORE_KINDS: Record<RuntimeStoreKind, true> = {
   'node-extra-ca': true,
   'go-ssl-cert-file': true,
   'go-ssl-cert-dir': true,
+  'go-system-bundle': true,
   'python-certifi': true,
   'python-ssl-cert-file': true,
   'python-requests-ca-bundle': true,

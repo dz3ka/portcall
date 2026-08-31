@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,8 +7,10 @@ import {
   MAX_DISCOVERY_MATCHES,
   MAX_RUNTIME_STORE_BYTES,
   PYTHON_CERTIFI_PATHS,
+  goSystemBundleStore,
   runtimeStoreReader,
 } from '../src/net/runtime-stores.ts';
+import { LINUX_CA_BUNDLE_PATHS } from '../src/net/os-truststore.ts';
 import { RUNTIMES, type Runtime } from '../src/profiles/schema.ts';
 import type { RuntimeStoreKind, RuntimeStoreOutcome } from '../src/net/types.ts';
 
@@ -243,6 +245,76 @@ describe('go', () => {
   it('reports no platform verifier once the environment overrides the set', async () => {
     const outcomes = await read(['go'], 'darwin', { SSL_CERT_FILE: fixture('extra-ca.pem') });
     expect(ofKind(outcomes, 'platform-verifier')).toEqual([]);
+  });
+
+  it('reads the system bundle on linux as one store, judged like any other', async () => {
+    // Only the shape: the row exists whether or not the runner has a bundle at
+    // one of the six paths, and asserting contents here would assert the host.
+    const bundle = one(await read(['go'], 'linux', {}), 'go-system-bundle');
+    expect(bundle.combines).toBe('standalone');
+  });
+
+  it('reports no system bundle once the environment overrides the set', async () => {
+    const outcomes = await read(['go'], 'linux', { SSL_CERT_FILE: fixture('extra-ca.pem') });
+    expect(ofKind(outcomes, 'go-system-bundle')).toEqual([]);
+  });
+});
+
+describe('go system bundle', () => {
+  // The helper takes `paths` for the reason the OS reader's bundle read does:
+  // the real rows are absolute host paths, and a case that statted them would
+  // pass on a linux runner and fail on a Windows one (see the file comment).
+  const NOPE = fixture('does-not-exist', 'ca-bundle.pem');
+
+  it('reads the first path that exists and records the ones tried before it', async () => {
+    const outcome = await goSystemBundleStore([NOPE, fixture('extra-ca.pem')], MAX_RUNTIME_STORE_BYTES);
+    expect(outcome.runtime).toBe('go');
+    expect(outcome.kind).toBe('go-system-bundle');
+    expect(outcome.combines).toBe('standalone');
+    samePath(outcome.locator, fixture('extra-ca.pem'));
+    expect(outcome.searched).toEqual([NOPE, fixture('extra-ca.pem')]);
+    expect(outcome.pems).toHaveLength(2);
+    expect(outcome.failure).toBeNull();
+  });
+
+  it('reports not-found, listing every path it tried, when no row exists', async () => {
+    // Six rows, shaped like the real table, none of them present.
+    const missing = LINUX_CA_BUNDLE_PATHS.map((path) => fixture('does-not-exist') + path);
+    const outcome = await goSystemBundleStore(missing, MAX_RUNTIME_STORE_BYTES);
+    expect(outcome.failure).toBe('not-found');
+    // No locator: there is no file to name (the certifi rule, for the same reason).
+    expect(outcome.locator).toBeNull();
+    expect(outcome.searched).toEqual(missing);
+    expect(outcome.searched).toHaveLength(6);
+    expect(outcome.pems).toEqual([]);
+  });
+
+  it('reports a bundle with no certificate in it as read-but-empty', async () => {
+    const outcome = await goSystemBundleStore([fixture('ssl-cert-dir', 'notes.txt')], MAX_RUNTIME_STORE_BYTES);
+    expect(outcome.failure).toBe('no-certificates');
+  });
+
+  it('refuses a bundle larger than the cap instead of buffering it', async () => {
+    const outcome = await goSystemBundleStore([fixture('extra-ca.pem')], 16);
+    expect(outcome.failure).toBe('output-too-large');
+    expect(outcome.pems).toEqual([]);
+  });
+
+  it('separates a path that is unreadable from one that is not there', async () => {
+    // A directory where a bundle should be: it exists, so it is not skipped,
+    // and reading it fails with an errno worth reporting.
+    const outcome = await goSystemBundleStore([FIXTURES], MAX_RUNTIME_STORE_BYTES);
+    expect(outcome.failure).toBe('unreadable');
+    expect(outcome.code).not.toBeNull();
+  });
+
+  it('is handed the OS reader\'s own table, so the two sets cannot drift', async () => {
+    // The soundness of the cross-check rests on Go and the OS reference reading
+    // one constant. The argument is not observable through `read` (the helper
+    // seam exists precisely so no case stats the real rows), so the call is
+    // pinned in the source, the way the subprocess guardrail pins its table.
+    const source = await readFile(join(import.meta.dirname, '..', 'src', 'net', 'runtime-stores.ts'), 'utf8');
+    expect(source).toContain('goSystemBundleStore(LINUX_CA_BUNDLE_PATHS, lookup.maxBytes)');
   });
 });
 

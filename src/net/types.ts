@@ -320,6 +320,7 @@ export type RuntimeStoreKind =
   | 'node-extra-ca' // NODE_EXTRA_CA_CERTS - Node *adds* these to the bundle
   | 'go-ssl-cert-file' // SSL_CERT_FILE   - replaces the set
   | 'go-ssl-cert-dir' // SSL_CERT_DIR    - replaces the set
+  | 'go-system-bundle' // the CA bundle Go reads on linux, from the same table the OS reader uses
   | 'python-certifi' // site-packages/certifi/cacert.pem, found by path
   | 'python-ssl-cert-file' // SSL_CERT_FILE
   | 'python-requests-ca-bundle' // REQUESTS_CA_BUNDLE - replaces certifi for `requests`

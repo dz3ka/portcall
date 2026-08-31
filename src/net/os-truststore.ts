@@ -101,16 +101,16 @@ const COMMAND_TABLE: readonly TrustStoreCommand[] = [
  * against a locator naming a file that had never been there, and the probe
  * suppressed every runtime verdict on that machine rather than report one.
  *
- * Borrowing Go's set is sound *conditionally*. It holds because this one table
- * is the whole of what the OS reference reads on Linux, which makes that
- * reference byte-identical to the set Go itself reads there: same files, same
- * order, so a root Go trusts is a root the reference has and the cross-check
- * of the two cannot go wrong. That equality is the whole of the argument. If
- * the OS reader ever also reads `/etc/ssl/certs/` as a directory,
- * the reference gains roots no file listed here carries, Go is then measured
- * against a superset of its own trust, and a false `missing-root` becomes
- * reachable. An OS-side certificate-*directory* read must therefore extend
- * Go's set in the same commit that adds it.
+ * Borrowing Go's set is sound *conditionally*: this table is the whole of
+ * what the OS reference reads on Linux, and `goSystemBundleStore` reads this
+ * same constant, so the reference equals the modeled Go store by construction.
+ * Real Go's set is this file plus its cert directories - a superset - so a
+ * root the reference has is a root Go trusts, and a false `missing-root` is
+ * unreachable. If the OS reader ever also reads `/etc/ssl/certs/` as a
+ * directory, the reference gains roots no file listed here carries, Go is
+ * then measured against a superset of its own trust, and a false
+ * `missing-root` becomes reachable. An OS-side certificate-*directory* read
+ * must therefore extend Go's set in the same commit that adds it.
  */
 const LINUX_PATHS: readonly string[] = [
   '/etc/ssl/certs/ca-certificates.crt',

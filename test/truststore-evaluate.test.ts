@@ -317,6 +317,28 @@ describe('truststore cross-check', () => {
     expect(verdict(findings)).toEqual(['truststore.os.read=ok', 'truststore.go.platform-verifier=ok']);
   });
 
+  it('judges the bundle go reads on linux like any other store, with no special case', () => {
+    // `go-system-bundle` arrives as one more standalone store: the cross-check
+    // needs no branch for it, which is the point of the reader emitting it.
+    const goBundle = (pems: readonly string[]): RuntimeStoreOutcome =>
+      runtimeStore('go', {
+        kind: 'go-system-bundle',
+        combines: 'standalone',
+        locator: '/etc/ssl/certs/ca-certificates.crt',
+        searched: ['/etc/ssl/certs/ca-certificates.crt'],
+        pems,
+      });
+
+    const present = crossCheck(
+      input({ runtimes: ['go'], runtimeStores: [goBundle([publicRootPem, localRootPem])] }),
+    );
+    expect(verdict(present)).toEqual(['truststore.os.read=ok', 'truststore.go.roots-present=ok']);
+
+    const missing = crossCheck(input({ runtimes: ['go'], runtimeStores: [goBundle([publicRootPem])] }));
+    expect(verdict(missing)).toEqual(['truststore.os.read=ok', 'truststore.go.missing-root=degraded']);
+    expect(evidence(byId(missing, 'truststore.go.missing-root'), 'anchor')).toEqual([LOCAL_ROOT]);
+  });
+
   it('manufactures neither verdict for a keystore it could not open', () => {
     const findings = crossCheck(
       input({

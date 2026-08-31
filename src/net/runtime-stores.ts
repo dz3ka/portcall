@@ -1,5 +1,6 @@
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { posix as posixPath, win32 as win32Path } from 'node:path';
+import { LINUX_CA_BUNDLE_PATHS } from './os-truststore.ts';
 import { pemBlocks } from './pem.ts';
 import { PUBLIC_ROOT_CA_PEMS } from './root-bundle.ts';
 import type { Runtime } from '../profiles/schema.ts';
@@ -467,11 +468,40 @@ async function nodeStores(lookup: Lookup): Promise<RuntimeStoreOutcome[]> {
 }
 
 /**
- * Go: the two OpenSSL variables, and on darwin and win32 - where Go calls the
- * platform verifier rather than reading a bundle - a row saying so. Emitting a
- * missing-root finding for Go there would be the tool lying on two of its three
- * target platforms, so the reader names the behaviour rather than leaving the
- * cross-check to infer it.
+ * The bundle Go's `crypto/x509` falls back to on linux: the first existing row
+ * of the same `LINUX_CA_BUNDLE_PATHS` the OS reference reads, which is what
+ * makes the cross-check of the two sound - one table, so the modeled Go set
+ * cannot drift from the reference (see that table's own comment). Exported
+ * with `paths` as an argument for the same reason the OS reader's bundle read
+ * is: the real rows are absolute host paths, and a test that statted them
+ * would pass on a linux runner and fail on a Windows one.
+ */
+export async function goSystemBundleStore(
+  paths: readonly string[],
+  maxBytes: number,
+): Promise<RuntimeStoreOutcome> {
+  const kind = 'go-system-bundle';
+  const combines = 'standalone';
+  const tried: string[] = [];
+  for (const path of paths) {
+    tried.push(path);
+    // A row that is not there is the ordinary case; the next row is the answer.
+    if (!(await exists(path))) continue;
+    const contents = await readPemFile(path, maxBytes);
+    return outcome('go', { kind, combines, locator: path, searched: capped(tried), ...contents });
+  }
+  // No locator: there is no file to name (the certifi rule, for the same reason).
+  return outcome('go', { kind, combines, searched: capped(paths), failure: 'not-found' });
+}
+
+/**
+ * Go: the two OpenSSL variables; on darwin and win32 - where Go calls the
+ * platform verifier rather than reading a bundle - a row saying so; on linux
+ * the system bundle Go actually reads. Emitting a missing-root finding for Go
+ * on the verifier platforms would be the tool lying on two of its three
+ * targets, so the reader names the behaviour rather than leaving the
+ * cross-check to infer it - and on linux it reads the bundle so the
+ * cross-check has real contents to judge, not an assertion to trust.
  */
 async function goStores(lookup: Lookup): Promise<RuntimeStoreOutcome[]> {
   const file = await envFileStore('go', 'go-ssl-cert-file', 'SSL_CERT_FILE', 'replaces', lookup);
@@ -480,6 +510,9 @@ async function goStores(lookup: Lookup): Promise<RuntimeStoreOutcome[]> {
   const usesVerifier = lookup.platform === 'darwin' || lookup.platform === 'win32';
   if (!overridden && usesVerifier) {
     return [file, dir, outcome('go', { kind: 'platform-verifier', combines: 'standalone' })];
+  }
+  if (!overridden && lookup.platform === 'linux') {
+    return [file, dir, await goSystemBundleStore(LINUX_CA_BUNDLE_PATHS, lookup.maxBytes)];
   }
   return [file, dir];
 }
