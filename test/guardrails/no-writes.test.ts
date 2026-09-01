@@ -18,6 +18,14 @@ import { EXIT } from '../../src/cli/exit-codes.ts';
  * (fanotify / FSEvents / ReadDirectoryChangesW) would be a stronger check, but
  * is not portable across the three CI runners this project targets
  * (Windows/macOS/Linux) — this is the honest, portable substitute.
+ *
+ * `LOCALAPPDATA`/`APPDATA` are redirected and snapshotted for the same reason:
+ * the Windows trust-store reader's PowerShell child once wrote a module
+ * analysis cache under the real `%LOCALAPPDATA%` (ADR-0040) and this guardrail
+ * could not see it. That pair is only non-vacuous for children that honour the
+ * environment variable — on a host whose PowerShell resolves the folder from
+ * the user profile instead, such a write would still land outside the sandbox.
+ * It removes a blind spot; it is not a local reproduction of the CI failure.
  */
 
 interface Inventory {
@@ -97,13 +105,22 @@ describe('no writes outside cwd guardrail', () => {
     const root = mkdtempSync(join(tmpdir(), 'portcall-guard-nowrite-'));
     const home = join(root, 'home');
     const sandboxTemp = join(root, 'temp');
+    const appLocal = join(root, 'appdata-local');
+    const appRoaming = join(root, 'appdata-roaming');
     const runCwd = join(root, 'cwd');
     mkdirSync(home);
     mkdirSync(sandboxTemp);
+    mkdirSync(appLocal);
+    mkdirSync(appRoaming);
     mkdirSync(runCwd);
 
     try {
-      const before = { home: snapshot(home), temp: snapshot(sandboxTemp) };
+      const before = {
+        home: snapshot(home),
+        temp: snapshot(sandboxTemp),
+        appLocal: snapshot(appLocal),
+        appRoaming: snapshot(appRoaming),
+      };
 
       const result = spawnSync(
         process.execPath,
@@ -118,6 +135,8 @@ describe('no writes outside cwd guardrail', () => {
             TEMP: sandboxTemp,
             TMP: sandboxTemp,
             TMPDIR: sandboxTemp,
+            LOCALAPPDATA: appLocal,
+            APPDATA: appRoaming,
           },
           encoding: 'utf8',
           timeout: 30_000,
@@ -128,10 +147,17 @@ describe('no writes outside cwd guardrail', () => {
       // The rendered report on stdout is the proof the run reached the end.
       expect(result.stdout).toContain('Loopback guardrail fixture');
 
-      const after = { home: snapshot(home), temp: snapshot(sandboxTemp) };
+      const after = {
+        home: snapshot(home),
+        temp: snapshot(sandboxTemp),
+        appLocal: snapshot(appLocal),
+        appRoaming: snapshot(appRoaming),
+      };
 
       expect(diff(before.home, after.home)).toEqual([]);
       expect(diff(before.temp, after.temp)).toEqual([]);
+      expect(diff(before.appLocal, after.appLocal)).toEqual([]);
+      expect(diff(before.appRoaming, after.appRoaming)).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -141,13 +167,22 @@ describe('no writes outside cwd guardrail', () => {
     const root = mkdtempSync(join(tmpdir(), 'portcall-guard-nowrite-out-'));
     const home = join(root, 'home');
     const sandboxTemp = join(root, 'temp');
+    const appLocal = join(root, 'appdata-local');
+    const appRoaming = join(root, 'appdata-roaming');
     const runCwd = join(root, 'cwd');
     mkdirSync(home);
     mkdirSync(sandboxTemp);
+    mkdirSync(appLocal);
+    mkdirSync(appRoaming);
     mkdirSync(runCwd);
 
     try {
-      const before = { home: snapshot(home), temp: snapshot(sandboxTemp) };
+      const before = {
+        home: snapshot(home),
+        temp: snapshot(sandboxTemp),
+        appLocal: snapshot(appLocal),
+        appRoaming: snapshot(appRoaming),
+      };
 
       const result = spawnSync(
         process.execPath,
@@ -162,6 +197,8 @@ describe('no writes outside cwd guardrail', () => {
             TEMP: sandboxTemp,
             TMP: sandboxTemp,
             TMPDIR: sandboxTemp,
+            LOCALAPPDATA: appLocal,
+            APPDATA: appRoaming,
           },
           encoding: 'utf8',
           timeout: 30_000,
@@ -177,10 +214,17 @@ describe('no writes outside cwd guardrail', () => {
       const written: unknown = JSON.parse(readFileSync(join(runCwd, 'report.json'), 'utf8'));
       expect(written).toMatchObject({ profile: { name: 'Loopback guardrail fixture' } });
 
-      // Nothing outside cwd (home, sandboxed temp) changed.
-      const after = { home: snapshot(home), temp: snapshot(sandboxTemp) };
+      // Nothing outside cwd (home, sandboxed temp, sandboxed AppData) changed.
+      const after = {
+        home: snapshot(home),
+        temp: snapshot(sandboxTemp),
+        appLocal: snapshot(appLocal),
+        appRoaming: snapshot(appRoaming),
+      };
       expect(diff(before.home, after.home)).toEqual([]);
       expect(diff(before.temp, after.temp)).toEqual([]);
+      expect(diff(before.appLocal, after.appLocal)).toEqual([]);
+      expect(diff(before.appRoaming, after.appRoaming)).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
