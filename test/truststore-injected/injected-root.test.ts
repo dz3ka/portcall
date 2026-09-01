@@ -99,6 +99,8 @@ function findingsById(findings: readonly Finding[], id: string): Finding[] {
 let findings: Finding[];
 /** SHA-256 of every anchor `osTrustStoreReader` read that is not in the runtime's own public bundle. */
 let locallyAddedSha256: Set<string>;
+/** SHA-256 of every locally-added anchor node's own trust set does not hold - the set `truststore.node.missing-root` reports. */
+let missingFromNodeSha256: Set<string>;
 
 beforeAll(async () => {
   const profile = loadedProfile();
@@ -128,7 +130,10 @@ beforeAll(async () => {
   const osOutcomes = await osTrustStoreReader.read({ signal: context.signal, deadline: context.deadline });
   const publicIndex = certificateIndex(PUBLIC_ROOT_CA_PEMS);
   const seen = new Set<string>();
-  locallyAddedSha256 = new Set();
+  // Keyed by sha256 and carrying the bytes, not only the digest: requirement 3
+  // asks its question in sha256, and `certificateIndex` asks its membership
+  // question in DER, so requirement 4 needs the certificate itself.
+  const locallyAddedDer = new Map<string, Uint8Array>();
   for (const store of osOutcomes) {
     if (store.failure !== null) continue;
     for (const pem of store.pems) {
@@ -136,9 +141,33 @@ beforeAll(async () => {
       const hash = sha256Hex(der);
       if (seen.has(hash)) continue;
       seen.add(hash);
-      if (!publicIndex.hasCertificate(der)) locallyAddedSha256.add(hash);
+      if (!publicIndex.hasCertificate(der)) locallyAddedDer.set(hash, der);
     }
   }
+  locallyAddedSha256 = new Set(locallyAddedDer.keys());
+
+  // A third read, off the deadline above and cheap where the two store sweeps
+  // are not: node's stores are the bundle already in this process plus at most
+  // one file `NODE_EXTRA_CA_CERTS` names, so this costs a `stat`, not a
+  // subprocess or a machine-wide enumeration.
+  //
+  // It re-derives the set `runtimeFindings` calls `missing` (evaluate.ts): the
+  // locally-added anchors above, less the ones node's own trust set holds.
+  // node has exactly one such set - `trustSets` finds no node store that
+  // `replaces`, so the bundled roots are the base and `NODE_EXTRA_CA_CERTS`
+  // `adds-to` it - which makes the union of node's readable stores that set,
+  // with no set-assembly logic to re-implement here.
+  const nodeOutcomes = await runtimeStoreReader.read(['node'], {
+    env: process.env,
+    platform: process.platform,
+    maxBytes: MAX_RUNTIME_STORE_BYTES,
+  });
+  const nodeIndex = certificateIndex(
+    nodeOutcomes.filter((outcome) => outcome.failure === null).flatMap((outcome) => outcome.pems),
+  );
+  missingFromNodeSha256 = new Set(
+    [...locallyAddedDer].filter(([, der]) => !nodeIndex.hasCertificate(der)).map(([hash]) => hash),
+  );
 });
 
 describe('the injected root, read from the real OS trust store', () => {
@@ -162,10 +191,38 @@ describe('the injected root, read from the real OS trust store', () => {
     expect(locallyAddedSha256.has(expectedRootSha256)).toBe(true);
   });
 
-  it('produces `truststore.node.missing-root` at degraded severity', () => {
+  /**
+   * ADR-0042: this requirement's teeth come from the re-derivation above, not
+   * from the finding's own evidence, and that is a deliberate narrowing.
+   *
+   * `missingRootFinding` (evaluate.ts) publishes a count, up to
+   * `MAX_REPORTED_DNS` subject DNs, the store's path, a `partial` marker and -
+   * only when the `tls` probe fed the run an anchor - correlation entries.
+   * There is no fingerprint and no sha256 anywhere on it, so *which* roots the
+   * finding is about is not recoverable from it by bytes; adding such an
+   * evidence entry would be a change to `src/` behaviour, out of scope for
+   * M4's close. `missing.length > 0` alone therefore reads as an injection
+   * proof without being one: any machine carrying a locally-added root
+   * satisfies it whether or not CI injected anything, and this repo's dev host
+   * carried 28 of them when measured 2026-09-01.
+   *
+   * So the count and the severity stay - they are what the *finding* is
+   * asserted to say - and membership is asked of the independently re-derived
+   * set instead. On a runner where the injection never happened, the root is
+   * in no store either reader can see, `missingFromNodeSha256` cannot hold its
+   * hash, and this goes red. That is the property the count alone never had.
+   *
+   * Severity is `degraded` here by construction rather than by luck:
+   * `observedAnchors` is `[]` in this suite's `ProbeContext`, so `correlate()`
+   * returns `null` and `evaluate.ts` takes the `degraded` branch every time.
+   * The `blocker` promotion is the harness suite's to prove (ADR-0041), on a
+   * run that has a live intercepted chain to correlate against.
+   */
+  it('produces `truststore.node.missing-root` at degraded severity, over a set holding the injected root', () => {
     const missing = findingsById(findings, 'truststore.node.missing-root');
     expect(missing.length).toBeGreaterThan(0);
     for (const finding of missing) expect(finding.severity).toBe('degraded');
+    expect(missingFromNodeSha256.has(expectedRootSha256)).toBe(true);
   });
 
   it('names the injected root’s DN in that finding’s evidence, as `dn` evidence', () => {

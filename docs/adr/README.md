@@ -101,3 +101,4 @@ Numbering is sequential at creation (`NNNN-kebab-title.md`). Status is one of:
 | [0039](0039-the-windows-machine-root-budget-is-set-from-a-563-root-host.md) | The `windows-machine-root` read budget is set from a 563-root host, not a 41-root laptop | Accepted |
 | [0040](0040-the-trust-store-reader-hands-powershell-a-null-module-analysis-cache-path.md) | The trust-store reader hands PowerShell a null module-analysis cache path | Accepted |
 | [0041](0041-the-harness-plants-its-os-trust-store-at-container-start.md) | The harness plants its OS trust store at container start, and stays a Node-only profile | Accepted |
+| [0042](0042-the-injection-proof-asserts-membership-by-re-derivation.md) | The injection proof asserts membership by re-derivation, and its teeth sit in two requirements | Accepted |
