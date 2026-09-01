@@ -10,14 +10,15 @@ on their machine, and answers a single question:
 It is not a diagnostic you run after the deployment fails. It is the artifact
 you send ahead of the first call.
 
-**Status:** M4 closed; M5 underway. The CLI, profile loader, finding model,
-three report renderers and the redaction boundary landed in M0; the `dns`,
-`egress`, `proxy` and `tls` probes are registered and run. The trust-store
-probe, and the cross-check between the root observed intercepting traffic and
-the stores each runtime actually reads, closed M4. M5 is packaging: two named
-vendor profiles - Anthropic Claude Code and Cursor - beside the generic one
-that ships today, a checksum manifest signed through Sigstore keyless signing,
-and a one-command demo of the hostile harness recorded as a terminal capture.
+**Status:** all five milestones closed; `v0.1.0-rc.1` is tagged. The CLI,
+profile loader, finding model, three report renderers and the redaction
+boundary landed in M0; the `dns`, `egress`, `proxy` and `tls` probes are
+registered and run. The trust-store probe, and the cross-check between the
+root observed intercepting traffic and the stores each runtime actually
+reads, closed M4. M5 shipped the packaging: two named vendor profiles -
+Anthropic Claude Code and Cursor - beside the generic one, a checksum
+manifest signed through Sigstore keyless signing, and a one-command demo of
+the hostile harness recorded as a terminal capture.
 Binaries themselves are unsigned until v2 - it is the manifest that is signed,
 not the executable.
 
