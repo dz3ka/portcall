@@ -423,8 +423,7 @@ plus the Node that runs the script - no `npm ci`, no build, no toolchain. SPEC.m
 one command "on a machine with nothing installed"; that was never accurate of
 this demo, since the demo *is* five containers, and ADR-0047 amends it.
 
-The GIF is committed by hand from a render the CI `demo` job produced, and it
-lands with the first green one - until then the link above is dead. It
+The GIF is committed by hand from a render the CI `demo` job produced. It
 is not regenerated per commit, and CI does not diff it - frame timing depends
 on how long Docker took on that runner, so a diff would flake on every run and
 teach everyone to ignore it
