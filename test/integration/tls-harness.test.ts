@@ -4,6 +4,7 @@ import type { LoadedProfile } from '../../src/profiles/schema.ts';
 import { runDns } from '../../src/probes/dns/index.ts';
 import { runProxy } from '../../src/probes/proxy/index.ts';
 import { runTls } from '../../src/probes/tls/index.ts';
+import { runTruststore } from '../../src/probes/truststore/index.ts';
 import {
   evidenceValue,
   findingById,
@@ -25,7 +26,10 @@ import {
  * test against live behaviour rather than against a fixture somebody wrote to
  * match the code.
  *
- * Four conditions, one `describe` each, in the order SPEC.md §10 lists them.
+ * The four network conditions SPEC.md §10 lists, in its order, then a fifth
+ * that section does not list because it is a property of the machine rather
+ * than of the network: a root the OS trusts and Node does not, planted by the
+ * container at start (ADR-0041). One `describe` each.
  * The probes are called directly rather than through the built CLI: a failure
  * should point at `runTls`, not at argv parsing, and the CLI has its own
  * coverage in the guardrail suite. Nothing here sleeps, polls or retries —
@@ -173,5 +177,45 @@ describe('a proxy that refuses to tunnel a non-443 port', () => {
     expect(ids).not.toContain('proxy.connect-refused');
     expect(ids).not.toContain('proxy.connect-timeout');
     expect(ids).not.toContain('proxy.connect-dns-failure');
+  });
+});
+
+/**
+ * The only place the whole chain runs live.
+ *
+ * Every other assertion on the cross-check hands `crossCheck` a fixture's idea
+ * of what `tls` observed. Here the intercepting proxy really re-signs, the
+ * container really planted mitmproxy's generated root in its own OS trust store
+ * at start (ADR-0041), and the promotion to `blocker` happens because the `tls`
+ * probe *watched that exact root terminate a chain* - which is the claim the
+ * severity makes to a reader, and the one a stubbed `observedAnchors` cannot
+ * substantiate. The two probes share one context on purpose: that field is the
+ * seam between them (ADR-0034), and a second context would quietly turn this
+ * into the fixture test it is meant not to be.
+ */
+describe('a root this machine trusts that node does not', () => {
+  it('promotes the missing root to a blocker when the tls probe observed it intercepting', async () => {
+    const context = harnessContext(profileWithPorts([443]));
+    await runTls(context, undefined, { HTTPS_PROXY: HARNESS_PROXIES.intercepting });
+    const findings = await runTruststore(context);
+
+    // The planted store has to have been read, or the cross-check below would
+    // be suppressed and every assertion after it would pass vacuously.
+    expect(findingById(findings, 'truststore.os.read').severity).toBe('ok');
+
+    const missing = findingById(findings, 'truststore.node.missing-root');
+    expect(missing.severity).toBe('blocker');
+    // Measured, not assumed: mitmproxy 11.0.2 does not send its CA with the leaf,
+    // so the correlation is by issuer name and never by bytes.
+    expect(evidenceValue(missing, 'match')).toBe('issuer-name');
+    expect(evidenceValue(missing, 'connection')).toBe('proxy');
+    expect(evidenceValue(missing, 'host')).toBe('api.anthropic.com');
+    expect(missing.remediation).toBeTruthy();
+
+    // ADR-0038's ordering, live: the correlated anchor is the one a reader
+    // needs first, so it leads the list rather than being truncated out of it
+    // by whatever else the OS store happens to hold.
+    const anchors = missing.evidence.filter((item) => item.label === 'anchor').map((item) => item.value);
+    expect(anchors[0]?.toLowerCase()).toContain('mitmproxy');
   });
 });

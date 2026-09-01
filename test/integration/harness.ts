@@ -18,6 +18,9 @@ import type { Endpoint, LoadedProfile, Profile } from '../../src/profiles/schema
 /** The command that brings the network up and runs this suite inside it. */
 export const HARNESS_COMMAND = [
   'docker compose -f test/harness/docker-compose.yml up --wait',
+  // build precedes every run: the image bakes the repo with `COPY . .` and
+  // nothing is bind-mounted, so a run after an edit re-executes the old tree.
+  'docker compose -f test/harness/docker-compose.yml build portcall',
   'docker compose -f test/harness/docker-compose.yml run --rm portcall',
   'docker compose -f test/harness/docker-compose.yml down -v',
 ].join('\n  ');

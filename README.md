@@ -324,11 +324,16 @@ really re-signing, one hop away.
 
 ```sh
 docker compose -f test/harness/docker-compose.yml up --wait
+docker compose -f test/harness/docker-compose.yml build portcall
 docker compose -f test/harness/docker-compose.yml run --rm portcall
 docker compose -f test/harness/docker-compose.yml down -v
 ```
 
-The middle command is what runs the suite — `npm run test:integration`, inside
+`build` is not optional: the image bakes the repo with `COPY . .` and nothing is
+bind-mounted, so a `run` after an edit re-executes the tree as it stood at the
+last build.
+
+The third command is what runs the suite — `npm run test:integration`, inside
 the network, where the harness's own resolver and names apply. Run on the host
 instead, that script refuses immediately and prints the three commands above.
 
@@ -340,8 +345,8 @@ machines. Requires Docker with `compose` v2. CI runs it as its own Linux-only
 job: the hosted Windows and macOS runners have no Linux Docker daemon, and
 nothing about a proxy re-signing TLS is host-OS dependent.
 
-The harness has been run. Its six tests — covering all four planted conditions
-— pass on a development machine's Docker daemon, both against a warm network
+The harness has been run. Its seven tests — covering all five planted
+conditions — pass on a development machine's Docker daemon, both against a warm network
 and from a cold `down -v` start that regenerates `mitmproxy`'s root, so the ids
 and severities it asserts against a live `mitmproxy`, `squid`, `dnsmasq` and
 `nginx` are observed rather than only written down. It has since also passed on a

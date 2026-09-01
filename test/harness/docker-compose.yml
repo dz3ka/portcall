@@ -1,13 +1,25 @@
 # The hostile network (SPEC.md §10, ADR-0025).
 #
-# Four planted conditions, one service each, on a network with a fixed subnet so
-# that every address in this file is also the address in the DNS zone below it:
+# Five planted conditions - the four network conditions of SPEC.md §10, plus one
+# property of the machine itself. Four of them are a service each, on a network
+# with a fixed subnet so that every address in this file is also the address in
+# the DNS zone below it:
 #
 #   dns          split-horizon answers - public names resolving to RFC1918
-#   origin       the "endpoint", serving a chain rooted in a CA nobody ships
 #   mitmproxy    a CONNECT proxy that re-signs TLS with its own generated root
 #   squid        a CONNECT proxy that demands Basic authentication
 #   nginx-proxy  a proxy that will not tunnel CONNECT for a non-443 port
+#
+# `origin` is a service too, but it is not one of the conditions: it is the
+# "endpoint" the conditions are planted around, serving a chain rooted in a CA
+# nobody ships so that there is something real to probe through them.
+#
+# The fifth condition has no service of its own, because it is a property of
+# the machine running the suite rather than of the network: the `portcall`
+# container installs mitmproxy's generated root into its own OS trust store at
+# start (`portcall-entrypoint.sh`, ADR-0041). That is the only way to plant a
+# root the *machine* trusts and the runtime does not, which is what the
+# truststore probe's runtime cross-check exists to find.
 #
 # `portcall` is the suite itself and is profile-gated: `docker compose up --wait`
 # brings up the network and stops, and `docker compose run --rm portcall` runs
@@ -15,8 +27,11 @@
 # probes need the harness's names and its resolver, and a suite on the host
 # would need a hosts-file edit to get them.
 #
-# Every image is pinned to a digest-stable tag rather than `latest`: a harness
-# that re-images itself between runs cannot be evidence of anything.
+# Every image is pinned to a version tag rather than `latest`: a harness that
+# re-images itself between runs cannot be evidence of anything. A tag and not a
+# digest, though - an upstream re-push under the same tag is still possible, and
+# tls-harness.test.ts's `issuer-name` literal is the tripwire that would catch
+# one changing mitmproxy's chain-sending behaviour.
 
 name: portcall-harness
 
@@ -74,7 +89,10 @@ services:
     # root, and mitmproxy verifies upstream certificates by default - without
     # this it answers every CONNECT with a 502 and the interception scenario
     # never happens. A real inspection appliance trusts its own corporate roots
-    # here; the harness has no store to install one into.
+    # here; the root this one would need is the *origin's*, and mitmproxy's own
+    # store is a different container's - the root the `portcall` container now
+    # plants (ADR-0041) is mitmproxy's, installed over there, and does nothing
+    # for this flag.
     command: ['mitmdump', '--listen-host', '0.0.0.0', '--listen-port', '8080', '--set', 'ssl_insecure=true']
     volumes:
       - mitm-ca:/home/mitmproxy/.mitmproxy
