@@ -45,12 +45,16 @@ import type { OsTrustStoreReader, TrustStoreCommand, TrustStoreFailure, TrustSto
  * with 563 roots in 42.9 s under the unamended `minimalEnv()` below. The runner
  * is the figure that governs - it is the machine the milestone is judged on, and
  * a laptop number quoted here once already read as a promise the runner does not
- * keep. The scratch-location passthrough in `minimalEnv()` reduces that cost; it
- * does not remove it. After that amendment the same runner read the store warm
- * in 22.7 s and 29.6 s, and its cold read was still going when a temporary 30 s
- * ceiling clipped it - so the post-amendment cold figure is known only to be
- * >=30 s, and 42.9 s remains the one cold read anyone has measured to
- * completion. That band, not the laptop's fifth of a second, is what the win32
+ * keep. The scratch-location passthrough in `minimalEnv()` was measured to
+ * reduce that cost without removing it: after that amendment the same runner
+ * read the store warm in 22.7 s and 29.6 s, and its cold read was still going
+ * when a temporary 30 s ceiling clipped it - so the post-amendment cold figure
+ * is known only to be >=30 s, and 42.9 s remains the one cold read anyone has
+ * measured to completion. Those runner figures predate ADR-0040, which now
+ * hands the child `PSModuleAnalysisCachePath=NUL`, so every spawn pays a cold
+ * module-analysis cache - measured at ~+140 ms of startup on a 41-root laptop
+ * and unmeasured on a runner, against a ceiling with ~17 s of headroom over the
+ * cold read. That band, not the laptop's fifth of a second, is what the win32
  * row's ceiling is sized against (ADR-0039). The macOS command's output shape
  * is **not** measured - see `test/fixtures/truststore/record-stores.ts`, which
  * records it from a real runner. Until that has run, the `pem-stream` branch is
@@ -165,16 +169,36 @@ function storeBudgetMs(command: TrustStoreCommand, deadline: number): number {
 /**
  * The child's whole environment, and deliberately almost none of one.
  * `SystemRoot` is what lets PowerShell find its own DLLs and `PATHEXT` is read
- * by the loader on the same platform. The six scratch locations after them -
- * `TEMP`, `TMP`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `ComSpec` - are here
- * because starving PowerShell of a place to keep its `ModuleAnalysisCache` is
- * not free: with no `LOCALAPPDATA` and no `APPDATA` the cache can be neither
- * read nor written, so every module is re-analysed on every single spawn.
- * Measured on a windows-latest runner (2026-08-28): bare PowerShell startup took
- * 5853 ms under `{SystemRoot, PATHEXT}` against 151 ms under the inherited
- * environment, and the machine-root read took 42859 ms of which
- * `firstByteMs=42776` - 99.8% of the wait is over before the first byte of
- * output exists.
+ * by the loader on the same platform.
+ *
+ * `PSModuleAnalysisCachePath` is the one value here that is not a passthrough,
+ * and `NUL` is not a location: it is Windows' null device, and it tells Windows
+ * PowerShell to keep its `ModuleAnalysisCache` nowhere at all. Left alone the
+ * child writes that cache - measured at 9426 bytes - into the user profile,
+ * which is a write outside the working directory that portcall's own spawn
+ * caused, and `test/guardrails/no-writes.test.ts` reddened `windows-latest` for
+ * it. The cache is suppressed rather than relocated: the only file portcall may
+ * put in the working directory is the report the operator named, and the
+ * guardrail snapshots the sandboxed temp too, so there is no directory a blob
+ * nobody asked for and nothing deletes could honestly go (ADR-0040). Note that
+ * the write is deferred: at the old 5 s ceiling the SIGKILL beat the flush, so
+ * ADR-0039's `60_000` is what let it land, and lowering the ceiling back is not
+ * a fix for it.
+ *
+ * The six scratch locations - `TEMP`, `TMP`, `LOCALAPPDATA`, `APPDATA`,
+ * `USERPROFILE`, `ComSpec` - were added as a set for that cache's sake, and the
+ * measurement was of the set: on a windows-latest runner (2026-08-28) bare
+ * PowerShell startup took 5853 ms under `{SystemRoot, PATHEXT}` against 151 ms
+ * under the inherited environment, and the machine-root read took 42859 ms of
+ * which `firstByteMs=42776` - 99.8% of the wait is over before the first byte of
+ * output exists. **With the cache suppressed they no longer buy a cache, and
+ * they are retained on an unmeasured possibility, not on that rationale**: no
+ * one has A/B'd them on `windows-latest` since, so whether they still buy
+ * anything is unknown, and the commit that had to unbreak CI was not the place
+ * to drop them on a hunch. ADR-0040 carries that as an open question. What is
+ * measured is that dropping `LOCALAPPDATA` and `APPDATA` would not have helped:
+ * PowerShell 5.1 resolves the cache folder from the profile, and it wrote the
+ * file on a run where neither name was set at all.
  *
  * That list is the whole amendment, and handing the child the inherited
  * environment instead is **not** the shorter version of it. That was measured
@@ -211,6 +235,9 @@ function minimalEnv(): NodeJS.ProcessEnv {
   if (appData !== undefined) env.APPDATA = appData;
   if (userProfile !== undefined) env.USERPROFILE = userProfile;
   if (comSpec !== undefined) env.ComSpec = comSpec;
+  // Fixed, never inherited: a customer's own value here would choose where the
+  // cache is written, and the point is that it is written nowhere.
+  env.PSModuleAnalysisCachePath = 'NUL';
   return env;
 }
 

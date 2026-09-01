@@ -288,9 +288,12 @@ describe('os trust store reader child environment', () => {
     }
   });
 
-  it('passes the scratch locations PowerShell needs to cache its module analysis', async () => {
-    // win32 only: everywhere else the child's environment is empty by design,
-    // and the cost these names buy back is a Windows one (see `minimalEnv`).
+  it('passes the scratch locations it still forwards, though the cache they were added for is suppressed', async () => {
+    // win32 only: everywhere else the child's environment is empty by design.
+    // These names arrived on the `ModuleAnalysisCache` rationale and ADR-0040
+    // suppressed that cache, so they are now retained on an unmeasured
+    // possibility instead (see `minimalEnv`). What this pins is that every one
+    // of them this process has still reaches the child - not why.
     if (process.platform !== 'win32') return;
     const expected = ['SystemRoot', 'PATHEXT', 'TEMP', 'TMP', 'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'ComSpec'];
     const present = expected.filter((name) => process.env[name] !== undefined);
@@ -300,6 +303,18 @@ describe('os trust store reader child environment', () => {
       timeoutMs: KILL_PATH_BUDGET_MS,
     });
     expect(outcome.code, 'a scratch location this process has did not reach the child').toBe(null);
+    expect(outcome.failure).toBe('no-certificates');
+  });
+
+  it('gives the child a null module-analysis cache path, so PowerShell writes no cache', async () => {
+    // win32 only: `PSModuleAnalysisCachePath` is a Windows PowerShell setting,
+    // and everywhere else the child's environment is empty by design.
+    if (process.platform !== 'win32') return;
+    const outcome = await readOneStore(
+      nodeCommand("process.exit(process.env.PSModuleAnalysisCachePath === 'NUL' ? 0 : 1);", 'pem-stream'),
+      { signal: quiet(), timeoutMs: KILL_PATH_BUDGET_MS },
+    );
+    expect(outcome.code, 'the child did not get the null cache path').toBe(null);
     expect(outcome.failure).toBe('no-certificates');
   });
 });
