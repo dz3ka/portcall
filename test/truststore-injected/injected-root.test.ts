@@ -105,7 +105,12 @@ beforeAll(async () => {
   const context: ProbeContext = {
     profile,
     net: new NetworkGuard(profile.profile),
-    deadline: Date.now() + 60_000,
+    // One deadline, two serial real reads: `runTruststore` below reads every
+    // store on this machine and then the re-derivation does it again, so the
+    // second read starts with whatever the first one spent already gone. The
+    // windows-machine-root row alone is allowed 60 s, so a 60 s run deadline
+    // left the second read a fraction of one row's ceiling.
+    deadline: Date.now() + 180_000,
     signal: new AbortController().signal,
     observedAnchors: [],
   };

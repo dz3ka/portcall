@@ -68,7 +68,7 @@ const EXPECTED_COMMANDS = [
     ],
     locator: 'Cert:\\LocalMachine\\Root',
     format: 'base64-der-lines',
-    timeoutMs: 5_000,
+    timeoutMs: 60_000,
   },
 ];
 

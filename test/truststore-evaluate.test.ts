@@ -65,6 +65,7 @@ function osStore(overrides: Partial<TrustStoreOutcome> = {}): TrustStoreOutcome 
     failure: null,
     code: null,
     budgetMs: null,
+    readMs: null,
     ...overrides,
   };
 }
@@ -498,6 +499,15 @@ describe('truststore cross-check', () => {
     expect(evidence(read, 'unparsable certificates')).toEqual(['2']);
   });
 
+  it('reports what the read cost on a store that answered, not only on one that did not', () => {
+    const findings = crossCheck(input({ osStores: [osStore({ pems: [publicRootPem], readMs: 213 })] }));
+
+    expect(evidence(byId(findings, 'truststore.os.read'), 'read took (ms)')).toEqual(['213']);
+    // The default fixture starts no read at all, so it has no elapsed time to
+    // report and the row stays off rather than printing a zero.
+    expect(evidence(byId(crossCheck(input()), 'truststore.os.read'), 'read took (ms)')).toEqual([]);
+  });
+
   it('leaves the count off a store every block of which parsed', () => {
     expect(evidence(byId(crossCheck(input()), 'truststore.os.read'), 'unparsable certificates')).toEqual([]);
   });
@@ -762,7 +772,7 @@ describe('truststore cross-check, when the OS store could not be read', () => {
 describe('truststore read-timeout remediation', () => {
   const WIN32_CEILING = OS_TRUSTSTORE_COMMANDS.find((command) => command.kind === 'windows-machine-root')?.timeoutMs;
 
-  function timedOut(budgetMs: number, code: string): Finding {
+  function timedOut(budgetMs: number, code: string, readMs: number | null = null): Finding {
     const findings = crossCheck(
       input({
         osStores: [
@@ -772,6 +782,7 @@ describe('truststore read-timeout remediation', () => {
             failure: 'timeout',
             code,
             budgetMs,
+            readMs,
           }),
         ],
       }),
@@ -798,6 +809,25 @@ describe('truststore read-timeout remediation', () => {
 
     expect(finding.remediation).toContain('would only wait longer for the same answer');
     expect(finding.remediation).not.toContain('--timeout raised');
+  });
+
+  /**
+   * What the failure itself cannot say. `timeout` means "at least the budget",
+   * so the reader of a red Windows leg has no way to tell a store that missed
+   * by a second from one that would still be running - which is the question
+   * the ceiling is set from (ADR-0039).
+   */
+  it('prints the elapsed read beside the budget, so a timeout carries a number', () => {
+    const finding = timedOut(WIN32_CEILING ?? 0, 'signal:SIGKILL', 60_002);
+
+    expect(evidence(finding, 'read took (ms)')).toEqual(['60002']);
+    expect(finding.evidence.every((item) => item.label !== 'read took (ms)' || item.kind === 'number')).toBe(true);
+  });
+
+  it('leaves the elapsed read off a store no child was started for', () => {
+    // Same rule as `budget applied (ms)` above: nothing ran, so there is no
+    // duration to print, and a 0 would say the read was instantaneous.
+    expect(evidence(timedOut(0, 'budget-exhausted'), 'read took (ms)')).toEqual([]);
   });
 
   it('names the run, not the machine, when the budget was exhausted before the spawn', () => {

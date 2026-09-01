@@ -45,11 +45,16 @@ import type { OsTrustStoreReader, TrustStoreCommand, TrustStoreFailure, TrustSto
  * with 563 roots in 42.9 s under the unamended `minimalEnv()` below. The runner
  * is the figure that governs - it is the machine the milestone is judged on, and
  * a laptop number quoted here once already read as a promise the runner does not
- * keep - and the scratch-location passthrough in `minimalEnv()` is what
- * addresses it. The macOS command's output shape is **not** measured - see
- * `test/fixtures/truststore/record-stores.ts`, which records it from a real
- * runner. Until that has run, the `pem-stream` branch is written against
- * Apple's documentation.
+ * keep. The scratch-location passthrough in `minimalEnv()` reduces that cost; it
+ * does not remove it. After that amendment the same runner read the store warm
+ * in 22.7 s and 29.6 s, and its cold read was still going when a temporary 30 s
+ * ceiling clipped it - so the post-amendment cold figure is known only to be
+ * >=30 s, and 42.9 s remains the one cold read anyone has measured to
+ * completion. That band, not the laptop's fifth of a second, is what the win32
+ * row's ceiling is sized against (ADR-0039). The macOS command's output shape
+ * is **not** measured - see `test/fixtures/truststore/record-stores.ts`, which
+ * records it from a real runner. Until that has run, the `pem-stream` branch is
+ * written against Apple's documentation.
  */
 
 // --- BEGIN PINNED COMMAND TABLE ---
@@ -88,7 +93,7 @@ const COMMAND_TABLE: readonly TrustStoreCommand[] = [
     ],
     locator: 'Cert:\\LocalMachine\\Root',
     format: 'base64-der-lines',
-    timeoutMs: 5_000,
+    timeoutMs: 60_000,
   },
 ];
 
@@ -262,6 +267,7 @@ export function readOneStore(
     failure: TrustStoreFailure | null,
     code: string | null,
     pems: readonly string[],
+    readMs: number | null,
   ): TrustStoreOutcome => ({
     kind: command.kind,
     locator: command.locator,
@@ -269,11 +275,13 @@ export function readOneStore(
     failure,
     code,
     budgetMs: options.timeoutMs,
+    readMs,
   });
 
   if (options.signal.aborted) {
-    // Same rule as the budget branch in `read`: no child, no budget.
-    return Promise.resolve({ ...outcome('aborted', 'run-signal', []), budgetMs: 0 });
+    // Same rule as the budget branch in `read`: no child, no budget - and no
+    // read either, so no elapsed time to report.
+    return Promise.resolve({ ...outcome('aborted', 'run-signal', [], null), budgetMs: 0 });
   }
 
   return new Promise<TrustStoreOutcome>((resolve) => {
@@ -282,6 +290,10 @@ export function readOneStore(
     let settled = false;
     let killed: Killed | null = null;
 
+    // Started before the spawn, not after it: on win32 almost the whole read is
+    // over before the first byte exists, so a clock that began at the first
+    // chunk would time the cheap part (see `minimalEnv` below).
+    const startedAt = Date.now();
     const child = spawn(command.file, [...command.argv], {
       shell: false,
       windowsHide: true,
@@ -313,7 +325,7 @@ export function readOneStore(
       settled = true;
       clearTimeout(timer);
       options.signal.removeEventListener('abort', onAbort);
-      resolve(outcome(failure, code, pems));
+      resolve(outcome(failure, code, pems, Date.now() - startedAt));
     };
 
     // Drained and retained nowhere: a ring buffer would only be a place for a
@@ -366,6 +378,12 @@ export function readOneStore(
  * itself is testable without writing a four-megabyte fixture.
  */
 export async function readLinuxCaBundle(paths: readonly string[], maxBytes: number): Promise<TrustStoreOutcome> {
+  const startedAt = Date.now();
+  // Every candidate path is at least stat'ed, so any list at all is a read that
+  // happened and has a duration. An empty one is the caller narrowing the list
+  // to nothing: no file was opened, and `null` says that where a 0 would claim
+  // a read that finished instantly.
+  const readMs = (): number | null => (paths.length === 0 ? null : Date.now() - startedAt);
   const outcome = (
     locator: string,
     pems: readonly string[],
@@ -374,7 +392,7 @@ export async function readLinuxCaBundle(paths: readonly string[], maxBytes: numb
     // No child, no timer, no budget: this branch opens a file, and a budget is
     // a statement about a process. `null` says that, where a `0` would read as
     // "it was given no time".
-  ): TrustStoreOutcome => ({ kind: 'linux-ca-bundle', locator, pems, failure, code, budgetMs: null });
+  ): TrustStoreOutcome => ({ kind: 'linux-ca-bundle', locator, pems, failure, code, budgetMs: null, readMs: readMs() });
 
   for (const path of paths) {
     let size: number;
@@ -437,6 +455,8 @@ export const osTrustStoreReader: OsTrustStoreReader = {
           // for the branch, not a budget any process got, and printing it as one
           // would tell an operator a store was read for 800 ms that never ran.
           budgetMs: 0,
+          // Nothing was started, so nothing took any time - the same reason.
+          readMs: null,
         });
         continue;
       }

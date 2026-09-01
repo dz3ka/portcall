@@ -296,8 +296,9 @@ function readTimeoutRemediation(store: TrustStoreOutcome, ceiling: number | null
     (rowBound
       ? 'That is the whole time this store gets on this platform rather than a slice of the run ' +
         "budget: the run's own --timeout is not what cut the read short, so raising it would " +
-        'only wait longer for the same answer. A healthy machine answers this read in well under ' +
-        'a second, so a store that outruns it is the finding rather than a number to retune. '
+        'only wait longer for the same answer. The ceiling is what a healthy host of this ' +
+        'platform actually needs for this read, with headroom above it, so a store that outruns ' +
+        'it is the finding rather than a number to retune. '
       : 'The run had less time left than this store is allowed, so the run budget is what cut ' +
         'the read short: re-run with --timeout raised to give it more room. ') +
     "If it still does not finish, list that store with your platform's own certificate tool and " +
@@ -320,6 +321,14 @@ function readTimeoutFinding(store: TrustStoreOutcome, ceiling: number | null): F
     evidence.push({ label: 'budget applied (ms)', value: String(store.budgetMs), kind: 'number' });
   } else if (ceiling !== null) {
     evidence.push({ label: 'store budget, never applied (ms)', value: String(ceiling), kind: 'number' });
+  }
+  // What the failure itself cannot say. `timeout` means "at least the budget",
+  // and whether the store missed it by a second or was nowhere near answering
+  // is the difference between a ceiling worth revising and a machine worth
+  // asking about (ADR-0039). Absent on the branch where no read was started,
+  // for the same reason the applied budget is.
+  if (store.readMs !== null) {
+    evidence.push({ label: 'read took (ms)', value: String(store.readMs), kind: 'number' });
   }
   evidence.push({ label: 'code', value: store.code ?? NO_CODE, kind: 'text' });
 
@@ -493,6 +502,12 @@ function osFindings(
           evidence: [
             { label: 'store', value: store.kind, kind: 'text' },
             { label: 'store read', value: store.locator, kind: 'path' },
+            // On the clean read too, not only on the timeout: a store that
+            // answers in 30 s is the one worth knowing about before it stops
+            // answering at all.
+            ...(store.readMs === null
+              ? []
+              : [{ label: 'read took (ms)', value: String(store.readMs), kind: 'number' as const }]),
             { label: 'anchors', value: String(anchors.length), kind: 'number' },
             { label: 'locally added', value: String(locallyAdded), kind: 'number' },
             // Only when there were any: a zero on every clean read is noise, and

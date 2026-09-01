@@ -24,7 +24,11 @@ export default defineConfig({
   test: {
     include: ['test/truststore-injected/**/*.test.ts'],
     testTimeout: 60_000,
-    hookTimeout: 60_000,
+    // The whole suite's real work happens in one `beforeAll`, which reads every
+    // store on the machine twice - and on win32 a single machine-root read has
+    // been measured at 42.9 s on a CI runner. The hook, not the tests, is what
+    // has to be allowed to wait for that.
+    hookTimeout: 240_000,
     // Zero, matching the integration config's reasoning: a flaky pass here
     // would hide a real per-OS discrepancy in how the probe reads a trust
     // store, which is the one thing this suite exists to catch.

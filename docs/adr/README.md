@@ -79,3 +79,4 @@ Numbering is sequential at creation (`NNNN-kebab-title.md`). Status is one of:
 | [0031](0031-cross-runtime-parity-is-a-verdict-claim-not-a-bundle-claim.md) | Cross-runtime parity is a verdict claim, not a bundle claim | Accepted |
 | [0032](0032-per-store-os-unreadable-not-one-aggregate.md) | An unreadable OS store gets its own finding, not a shared aggregate | Accepted |
 | [0038](0038-correlated-anchors-take-evidence-priority-in-missing-root-truncation.md) | Correlated anchors take evidence priority over alphabetical order in truststore missing-root findings | Accepted |
+| [0039](0039-the-windows-machine-root-budget-is-set-from-a-563-root-host.md) | The `windows-machine-root` read budget is set from a 563-root host, not a 41-root laptop | Accepted |

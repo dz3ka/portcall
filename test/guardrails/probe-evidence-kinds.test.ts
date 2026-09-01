@@ -518,6 +518,9 @@ async function truststoreFindings(): Promise<Finding[]> {
     failure: null,
     code: null,
     budgetMs: null,
+    // Elapsed milliseconds, not a customer's anything - a real figure off a
+    // windows-latest runner, so the row is driven rather than left off.
+    readMs: 42_859,
     ...overrides,
   });
 

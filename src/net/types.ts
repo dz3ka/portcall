@@ -260,6 +260,18 @@ export interface TrustStoreOutcome {
    * the second is a lie, so it may not be written once for both.
    */
   budgetMs: number | null;
+  /**
+   * Wall time the read actually took, or `null` when no child/file read was
+   * started. Measured from before the spawn, so it counts whatever the tool
+   * spent starting up - on win32 that has been 99.8% of the wait.
+   *
+   * It carries what `failure` cannot. A `timeout` says "at least the budget"
+   * and stops there, so a store that missed by a second and a store that would
+   * still be running read identically - and that difference is what a row
+   * ceiling is set from (ADR-0039). Shipping the number means the next revision
+   * of one reads it off an ordinary run instead of a diagnostic build.
+   */
+  readMs: number | null;
 }
 
 export interface OsTrustStoreReader {

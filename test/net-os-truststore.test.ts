@@ -54,9 +54,16 @@ function quiet(): AbortSignal {
  */
 const KILL_PATH_BUDGET_MS = 5_000;
 
-/** A deadline far enough out that every row gets its whole `timeoutMs`. */
+/**
+ * A deadline far enough out that every row gets its whole `timeoutMs`. It has
+ * to clear the largest ceiling on the pinned table plus
+ * `STORE_BUDGET_RESERVE_MS`, not the ceiling of whichever row this platform
+ * happens to read: below that, `storeBudgetMs` clamps the row down and the
+ * live reads below stop being a test of the store and become a test of this
+ * number.
+ */
 function generousDeadline(): number {
-  return Date.now() + 60_000;
+  return Date.now() + 180_000;
 }
 
 /** The pinned budget of the row for `kind`, or `null` if this platform has no such row. */
@@ -375,7 +382,10 @@ describe('os trust store reader on this platform', () => {
     const outcomes = await osTrustStoreReader.read({ signal: quiet(), deadline: generousDeadline() });
     expect(outcomes.map((outcome) => outcome.kind)).toEqual(platformKinds());
     for (const outcome of outcomes) assertWellFormed(outcome);
-  });
+    // Per test, not the suite: this one waits on a real store, whose ceiling on
+    // win32 is most of a minute on its own. The other suites keep the 60 s
+    // default, which is what catches a unit test that has hung.
+  }, 120_000);
 
   /**
    * What `verify` is allowed to claim about a live read, and no more. A store
@@ -406,7 +416,7 @@ describe('os trust store reader on this platform', () => {
       expect(outcome.failure, detail).toBe('timeout');
       expect(['signal:SIGKILL', 'budget-exhausted'], detail).toContain(outcome.code);
     }
-  });
+  }, 120_000);
 });
 
 /**
@@ -475,6 +485,34 @@ describe('os trust store read budget', () => {
     }
   });
 
+  /**
+   * The elapsed read, which is the number a `timeout` outcome does not carry:
+   * `failure: 'timeout'` says "at least the ceiling" and stops there, so a
+   * store that missed by a second and one that would never have answered read
+   * identically. Asserted as a pair, because the null is load-bearing too - it
+   * is what keeps a read that never started out of the elapsed column.
+   */
+  it('reports how long a read took, and nothing at all where no read was started', async () => {
+    const ran = await readOneStore(nodeCommand(`process.stdout.write('nothing');`, 'pem-stream'), {
+      signal: quiet(),
+      timeoutMs: KILL_PATH_BUDGET_MS,
+    });
+    expect(ran.readMs, 'a read that ran reported no elapsed time').not.toBeNull();
+    expect(ran.readMs ?? -1).toBeGreaterThanOrEqual(0);
+
+    const outcomes = await osTrustStoreReader.read({ signal: quiet(), deadline: Date.now() - 1 });
+    if (!spawns) {
+      // The linux branch has no budget branch to reach: it opens a file, and
+      // it does that whatever the deadline says, so the read did happen.
+      for (const outcome of outcomes) expect(outcome.readMs).not.toBeNull();
+      return;
+    }
+    for (const outcome of outcomes) {
+      expect(outcome.code).toBe('budget-exhausted');
+      expect(outcome.readMs, 'a store no child was started for reported an elapsed read').toBeNull();
+    }
+  });
+
   it('lets an already-fired run signal outrank both budget branches', async () => {
     const controller = new AbortController();
     controller.abort();
@@ -499,7 +537,10 @@ describe('os trust store read budget', () => {
     if (process.platform !== 'linux') return;
     const outcomes = await osTrustStoreReader.read({ signal: quiet(), deadline: generousDeadline() });
     expect(outcomes.map((each) => each.budgetMs)).toEqual([null]);
-  });
+    // The same allowance as the two live reads above, for the same reason: the
+    // linux branch here is a real store read. It opens a file rather than
+    // starting a child, so it has never come near either budget.
+  }, 120_000);
 });
 
 function platformKinds(): string[] {
@@ -522,5 +563,11 @@ function assertWellFormed(outcome: TrustStoreOutcome): void {
   if (outcome.kind === 'linux-ca-bundle') expect(outcome.budgetMs).toBeNull();
   else expect(outcome.budgetMs, `${outcome.kind} reported no budget`).not.toBeNull();
   // Zero is the whole no-spawn signal, so it may not leak onto a read that ran.
-  if (outcome.code === 'budget-exhausted') expect(outcome.budgetMs).toBe(0);
+  if (outcome.code === 'budget-exhausted') {
+    expect(outcome.budgetMs).toBe(0);
+    // Nothing ran, so nothing took any time; a 0 here would read as an
+    // instantaneous read rather than an absent one.
+    expect(outcome.readMs).toBeNull();
+  }
+  if (outcome.readMs !== null) expect(outcome.readMs).toBeGreaterThanOrEqual(0);
 }

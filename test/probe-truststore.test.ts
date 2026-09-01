@@ -135,6 +135,8 @@ describe('truststore probe shell', () => {
           failure: null,
           code: null,
           budgetMs: null,
+          // A stub, so no read was performed to have taken any time.
+          readMs: null,
         },
       ]),
       runtimeReaderStub([
