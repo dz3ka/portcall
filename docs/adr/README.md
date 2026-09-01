@@ -108,3 +108,4 @@ Numbering is sequential at creation (`NNNN-kebab-title.md`). Status is one of:
 | [0046](0046-the-demo-is-a-real-check-that-must-exit-2.md) | The demo is a real check against the harness, and it must exit 2 | Accepted |
 | [0047](0047-the-demo-recording-is-a-tape-rendered-in-ci.md) | The demo recording is a tape rendered in CI, and the committed GIF is a snapshot | Accepted |
 | [0048](0048-release-checksums-are-signed-with-sigstore-keyless.md) | Release checksums are signed with Sigstore keyless; the binaries stay unsigned until v2 | Accepted |
+| [0049](0049-shell-heredocs-are-not-a-file-writing-primitive-on-windows.md) | Shell heredocs are not a file-writing primitive on this Windows toolchain | Accepted |

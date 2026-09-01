@@ -2,5 +2,5 @@
   "_": "Read by .github/workflows/notify-portfolio.yml and reported to dz3ka/portfolio, which derives the bench label and the progress bar from it. Bump `milestone` and `complete` in the same commit that closes a milestone - that is the one manual step, and it is a judgement CI cannot make.",
   "milestone": 5,
   "milestonesTotal": 5,
-  "complete": false
+  "complete": true
 }
