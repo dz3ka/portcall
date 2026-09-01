@@ -1,7 +1,10 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { ProbeContext } from '../../src/engine/index.ts';
 import { NetworkGuard } from '../../src/net/guard.ts';
 import type { Finding } from '../../src/model/finding.ts';
-import type { Endpoint, LoadedProfile, Profile } from '../../src/profiles/schema.ts';
+import { parseProfile } from '../../src/profiles/loader.ts';
+import type { LoadedProfile } from '../../src/profiles/schema.ts';
 
 /**
  * The harness-only profile and the guard that refuses to run without the
@@ -42,48 +45,24 @@ export const HARNESS_PROXIES = {
 /**
  * The harness profile.
  *
- * It is a fixture rather than a loosening of `NetworkGuard`: SPEC.md §4 says
- * portcall contacts no host the active profile did not name, and the harness
- * gets its endpoints admitted the same way a customer's would - by being in a
- * profile. The two hosts are the real public names the shipped profile uses,
- * which is what makes the DNS scenario a *split horizon* rather than a private
- * name resolving privately.
+ * Parsed from `test/harness/demo-profile.yaml`, which is the single definition
+ * of it: `npm run demo` hands the CLI that same path, so the demo and this
+ * suite cannot drift into describing two different networks, and the file the
+ * demo depends on is exercised by every harness run rather than only when
+ * somebody records one (ADR-0046). The comments arguing the profile's contents
+ * - why the hosts are real public names, why `interception_tolerated` is
+ * `false` - live in the YAML, beside what they explain.
  *
- * `interception_tolerated: false` is deliberate. It is the setting that makes
- * `tls.private-root` a `blocker` instead of a `degraded`, and severity is API
- * here in the same way finding ids are - a harness that only ever exercised the
- * lenient branch would let the strict one rot.
+ * Read through the real loader, not a hand-built object, so a profile that
+ * stopped validating fails here the same way it would fail a customer.
  */
 export function harnessProfile(): LoadedProfile {
-  const endpoints: Endpoint[] = [
-    {
-      host: 'api.anthropic.com',
-      port: 443,
-      purpose: 'harness origin, reached over TLS',
-      required: true,
-      expect_streaming: false,
-    },
-    {
-      // Non-443 on purpose: this is the endpoint routed through the proxy that
-      // will not tunnel. The tls probe ignores it (it captures 443 only), which
-      // is why the interception scenario is unaffected by its presence.
-      host: 'registry.npmjs.org',
-      port: 8080,
-      purpose: 'harness endpoint on a port the refusing proxy will not tunnel',
-      required: false,
-      expect_streaming: false,
-    },
-  ];
-
-  const profile: Profile = {
-    name: 'Portcall hostile-network harness',
-    endpoints,
-    doh_resolvers: [],
-    runtimes: ['node'],
-    tls: { min_version: '1.2', interception_tolerated: false },
-  };
-
-  return { id: 'harness', source: 'builtin', profile };
+  // Resolved against this module rather than the cwd: the suite's cwd is the
+  // image's WORKDIR today, and that is not a property worth depending on. The
+  // id is the path `npm run demo` gives the CLI, so a report produced either
+  // way says the same thing about where the profile came from.
+  const path = fileURLToPath(new URL('../harness/demo-profile.yaml', import.meta.url));
+  return parseProfile('test/harness/demo-profile.yaml', 'file', readFileSync(path, 'utf8'));
 }
 
 /**

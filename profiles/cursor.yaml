@@ -1,0 +1,73 @@
+# Cursor. Every endpoint below is one entry from Anysphere's own enterprise
+# network-configuration page, and the `# source:` line above it is that
+# citation. An endpoint that cannot be cited does not ship: declaring a host is
+# exactly what makes portcall contact it, so a
+# hostname recalled rather than read would be unauthorised egress on somebody
+# else's network (ADR-0043).
+#
+# Deliberately absent: the wildcard patterns the same page recommends
+# (`*.cursor.sh`, `*.cursorapi.com`, `*.cursor-cdn.com`, `*.cursorvm.com`). A
+# profile endpoint is one concrete host portcall opens a socket to; a wildcard
+# has nothing to connect to, and expanding one means inventing names the vendor
+# never published. The regional Cursor Tab hosts (`api4`, `*.gcpp.cursor.sh`)
+# are out for the mirror-image reason: which one a customer uses depends on
+# where they are, so probing all three would report two failures that every
+# customer would be right to ignore.
+name: Cursor
+endpoints:
+  # source: https://cursor.com/docs/enterprise/network-configuration
+  - host: api2.cursor.sh
+    port: 443
+    purpose: model inference (most API requests)
+    required: true
+    expect_streaming: true
+  # source: https://cursor.com/docs/enterprise/network-configuration
+  - host: api5.cursor.sh
+    port: 443
+    purpose: agent requests
+    required: true
+    expect_streaming: true
+  # source: https://cursor.com/docs/enterprise/network-configuration
+  - host: authenticate.cursor.sh
+    port: 443
+    purpose: authorization endpoint
+    required: true
+  # source: https://cursor.com/docs/enterprise/network-configuration
+  - host: authenticator.cursor.sh
+    port: 443
+    purpose: auth UI and login webview
+    required: true
+  # source: https://cursor.com/docs/enterprise/network-configuration
+  - host: authentication.cursor.sh
+    port: 443
+    purpose: JWT issuer
+    required: true
+  # source: https://cursor.com/docs/enterprise/network-configuration
+  - host: prod.authentication.cursor.sh
+    port: 443
+    purpose: production token issuer
+    required: true
+  # source: https://cursor.com/docs/enterprise/network-configuration
+  - host: api3.cursor.sh
+    port: 443
+    purpose: Cursor Tab completions
+    required: false          # HTTP/2 only; autocomplete degrades, sign-in does not
+  # source: https://cursor.com/docs/enterprise/network-configuration
+  - host: repo42.cursor.sh
+    port: 443
+    purpose: codebase search
+    required: false          # HTTP/2 only
+  # source: https://cursor.com/docs/enterprise/network-configuration
+  - host: marketplace.cursorapi.com
+    port: 443
+    purpose: extension marketplace
+    required: false
+  # source: https://cursor.com/docs/enterprise/network-configuration
+  - host: downloads.cursor.com
+    port: 443
+    purpose: client updates
+    required: false
+runtimes: [node]           # which trust stores to cross-check
+tls:
+  min_version: "1.2"
+  interception_tolerated: true   # an Electron client behind a re-signing proxy

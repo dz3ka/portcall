@@ -45,9 +45,15 @@ export function renderText(report: RedactedReport): string {
     lines.push('No findings.');
     lines.push('');
     lines.push(
-      'This build registers no probes yet (M0). An empty report means the run',
+      'Every check the active profile asked for ran and reported nothing.',
     );
-    lines.push('completed, not that the network was checked.');
+    lines.push(
+      'Portcall probes only the hosts that profile names, on port 443 only, so',
+    );
+    lines.push(
+      'this is a clean result for that profile - not a clean bill of health for',
+    );
+    lines.push('the network.');
   } else {
     for (const finding of report.findings) {
       lines.push(`[${SEVERITY_LABEL[finding.severity]}] ${finding.id}`);

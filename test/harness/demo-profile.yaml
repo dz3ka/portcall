@@ -1,0 +1,43 @@
+# The hostile-network harness profile (SPEC.md §10, ADR-0025, ADR-0046).
+#
+# This file is the *single* definition of that profile. `npm run demo` passes it
+# to `portcall check` inside the harness container, and `harnessProfile()` in
+# `test/integration/harness.ts` parses these same bytes, so the demo and the
+# integration suite cannot end up describing two different networks. It is
+# therefore exercised on every harness run, not only when somebody records a
+# demo (ADR-0046).
+#
+# It is deliberately not in `profiles/`: those are shipped profiles, embedded in
+# the binary at build time and listed by `portcall profiles` (ADR-0003), and a
+# harness fixture is none of those things.
+#
+# It is a fixture rather than a loosening of `NetworkGuard`: SPEC.md §4 says
+# portcall contacts no host the active profile did not name, and the harness
+# gets its endpoints admitted the same way a customer's would - by being in a
+# profile. The two hosts are the real public names the shipped profile uses,
+# which is what makes the DNS scenario a *split horizon* rather than a private
+# name resolving privately.
+name: Portcall hostile-network harness
+endpoints:
+  - host: api.anthropic.com
+    port: 443
+    purpose: harness origin, reached over TLS
+    required: true
+    expect_streaming: false
+  # Non-443 on purpose: this is the endpoint routed through the proxy that will
+  # not tunnel. The tls probe ignores it (it captures 443 only), which is why
+  # the interception scenario is unaffected by its presence.
+  - host: registry.npmjs.org
+    port: 8080
+    purpose: harness endpoint on a port the refusing proxy will not tunnel
+    required: false
+    expect_streaming: false
+runtimes: [node]      # the fifth condition: a root the machine trusts and node does not
+tls:
+  min_version: "1.2"
+  # Deliberate, and load-bearing twice over. It is the setting that makes
+  # `tls.private-root` a `blocker` instead of a `degraded` - which is what makes
+  # the demo exit 2 - and severity is API here in the same way finding ids are:
+  # a harness that only ever exercised the lenient branch would let the strict
+  # one rot.
+  interception_tolerated: false

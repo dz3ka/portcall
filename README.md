@@ -281,6 +281,26 @@ npx portcall check --profile generic-ai-tool --format html --out portcall-report
 `--out` must land inside the current working directory. That is a trust
 property, not a convenience.
 
+Three profiles ship embedded in the binary, and the `--profile` id of each is
+its filename in `profiles/` with the extension dropped:
+
+- `--profile claude-code` - Anthropic Claude Code.
+- `--profile cursor` - Cursor.
+- `--profile generic-ai-tool` - the endpoints almost any AI developer tool
+  needs, and nothing vendor-specific.
+
+Every endpoint in the two vendor profiles carries a `# source:` line naming the
+vendor page it was read from, because declaring a host is exactly what makes
+portcall connect to it. `--profile ./acme.yaml` reads a profile off disk
+instead, through the same parser.
+
+A profile is data, not code, so a new vendor arrives as a pull request against
+`profiles/` rather than as a wait for the next release
+([ADR-0003](docs/adr/0003-profiles-are-data-embedded-at-build-time.md)). What
+that costs is a rename: the file stem *is* the published command line, so it is
+treated as API from the first tag
+([ADR-0043](docs/adr/0043-a-profile-filename-is-public-cli-surface.md)).
+
 ### Exit codes
 
 Customers run this in their own CI, so these are API. Changing one is a
@@ -302,7 +322,10 @@ invocation is wrong" stay distinguishable.
 
 ### Build from source
 
-Binaries are unsigned until v2. Until then, build it yourself:
+The released executables are unsigned until v2, and stay unsigned however
+carefully you verify the release - see [Verify a release](#verify-a-release)
+for what the signature does and does not cover. Building it yourself is the
+other way:
 
 ```bash
 npm ci
@@ -315,7 +338,61 @@ profiles are in sync with `profiles/` and compiles `src/` to `dist/`. The
 per-platform executables described in SPEC.md §5 are built by
 `npm run build:binaries`, which needs [bun](https://bun.sh) on PATH and
 cross-compiles all five targets plus their SHA-256 sums. CI builds all five on
-every push and keeps them as a build artifact; signed releases come at v2.
+every push and keeps them as a build artifact.
+
+### Verify a release
+
+A pushed `v*` tag publishes seven assets: the five executables, a
+`SHA256SUMS` manifest covering all five, and `SHA256SUMS.cosign.bundle`. The
+bundle holds the signature over that manifest, the short-lived Fulcio
+certificate it was made with, and the Rekor inclusion proof. There is no
+private key anywhere in this project: the release workflow signs through
+Sigstore keyless, with a GitHub OIDC token it mints for the ~10 minutes the
+signing takes
+([ADR-0048](docs/adr/0048-release-checksums-are-signed-with-sigstore-keyless.md)).
+
+Download the manifest, the bundle and the binary you want, then check the
+signature on the manifest. Needs [cosign](https://github.com/sigstore/cosign)
+v3 or newer:
+
+```bash
+cosign verify-blob SHA256SUMS \
+  --bundle SHA256SUMS.cosign.bundle \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/dz3ka/portcall/\.github/workflows/release\.yml@refs/tags/v'
+```
+
+Then check the binary against the now-trusted manifest:
+
+```bash
+sha256sum --ignore-missing -c SHA256SUMS
+```
+
+`sha256sum` is GNU coreutils. On macOS the equivalent is `shasum -a 256
+--ignore-missing -c SHA256SUMS`; in PowerShell there is no `-c` mode, so
+compare `Get-FileHash -Algorithm SHA256 <file>` against the matching line by
+eye. `--ignore-missing` is what lets any of them pass when you downloaded one
+of the five executables rather than all of them; drop it if you have the whole
+set.
+
+**What that proves is narrow, and the narrowness is the point.** The signature
+covers the *manifest*, and what it establishes is that this repository's
+release workflow produced it at a `v*` tag. The executables themselves carry no
+OS code signature - no Authenticode certificate, no Apple notarisation - so
+Gatekeeper and SmartScreen will still object to them, and a verified manifest
+does nothing to change that. Signing the executables is v2.
+
+The two commands above are not documentation of a process nobody runs: the
+release workflow runs the `cosign verify-blob` line verbatim, against the files
+it is about to upload, before it uploads them. Rename that workflow file or
+trigger it off something other than a `v*` tag and the certificate identity
+stops matching, so the release fails there rather than shipping assets whose
+published verification command does not work.
+
+Releases are cut from a commit already green on all three OSes - `verify` runs
+on ubuntu, macOS and Windows on every push - and the release workflow re-runs
+`npm run verify` on the tagged commit itself before building anything, because
+a tag can be pushed at a commit that never went through a pull request.
 
 ## The hostile network
 
@@ -326,6 +403,33 @@ inside it: `mitmproxy` re-signing TLS with a root it generates on first boot,
 an `nginx` that will not tunnel a `CONNECT`. Everything else in this repo
 judges a certificate chain somebody recorded; this judges one a real proxy is
 really re-signing, one hop away.
+
+![portcall bringing the hostile network up, running a check inside it, and
+exiting 2 with the planted blockers named](demo/portcall-demo.gif)
+
+One command does all of that:
+
+```bash
+npm run demo
+```
+
+It brings the network up, runs a real `portcall check` inside it, prints the
+report and tears the network down - and it *requires* the check to exit `2`
+([ADR-0046](docs/adr/0046-the-demo-is-a-real-check-that-must-exit-2.md)). A run
+of this network that finds nothing is a broken demo, not a passing one, so the
+demo is an assertion and CI runs it as one. It needs Docker with `compose` v2,
+plus the Node that runs the script - no `npm ci`, no build, no toolchain. SPEC.md §11 asked for
+one command "on a machine with nothing installed"; that was never accurate of
+this demo, since the demo *is* five containers, and ADR-0047 amends it.
+
+The GIF is committed by hand from a render the CI `demo` job produced, and it
+lands with the first green one - until then the link above is dead. It
+is not regenerated per commit, and CI does not diff it - frame timing depends
+on how long Docker took on that runner, so a diff would flake on every run and
+teach everyone to ignore it
+([ADR-0047](docs/adr/0047-the-demo-recording-is-a-tape-rendered-in-ci.md)). It
+can therefore lag the current output. The command above is what runs on every
+push; the image is only a picture of it.
 
 ```sh
 docker compose -f test/harness/docker-compose.yml up --wait

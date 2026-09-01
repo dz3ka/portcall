@@ -102,3 +102,9 @@ Numbering is sequential at creation (`NNNN-kebab-title.md`). Status is one of:
 | [0040](0040-the-trust-store-reader-hands-powershell-a-null-module-analysis-cache-path.md) | The trust-store reader hands PowerShell a null module-analysis cache path | Accepted |
 | [0041](0041-the-harness-plants-its-os-trust-store-at-container-start.md) | The harness plants its OS trust store at container start, and stays a Node-only profile | Accepted |
 | [0042](0042-the-injection-proof-asserts-membership-by-re-derivation.md) | The injection proof asserts membership by re-derivation, and its teeth sit in two requirements | Accepted |
+| [0043](0043-a-profile-filename-is-public-cli-surface.md) | The named profiles are Claude Code and Cursor, and a profile filename is public CLI surface | Accepted |
+| [0044](0044-profiles-check-proves-freshness-not-validity.md) | `profiles:check` proves the embed is fresh, not that a profile is valid | Accepted |
+| [0045](0045-the-self-contained-html-claim-is-a-static-enumeration.md) | The self-contained HTML claim is a static enumeration, not a rendered load | Accepted |
+| [0046](0046-the-demo-is-a-real-check-that-must-exit-2.md) | The demo is a real check against the harness, and it must exit 2 | Accepted |
+| [0047](0047-the-demo-recording-is-a-tape-rendered-in-ci.md) | The demo recording is a tape rendered in CI, and the committed GIF is a snapshot | Accepted |
+| [0048](0048-release-checksums-are-signed-with-sigstore-keyless.md) | Release checksums are signed with Sigstore keyless; the binaries stay unsigned until v2 | Accepted |

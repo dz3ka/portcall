@@ -32,6 +32,8 @@
     "profiles:check": "node scripts/embed-profiles.mjs --check",
     "build": "npm run profiles:check && tsc -p tsconfig.build.json",
     "build:binaries": "node scripts/build-binaries.mjs",
+    "demo": "node scripts/demo.mjs",
+    "demo:record": "vhs demo/portcall-demo.tape",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test": "vitest run",

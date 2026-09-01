@@ -248,6 +248,21 @@ Follow the pattern that already works in your repos: one command, on a machine w
 installed, that brings up the hostile-network harness, runs Portcall against it, and shows the
 report identifying every planted blocker — recorded as a short screen capture for the site.
 
+**Amended during M5 (ADR-0047).** The paragraph above stands except in two places, and both
+are corrections rather than changes of mind:
+
+- **"a machine with nothing installed" was never accurate.** The demo *is* the harness, and
+  the harness is five containers. `npm run demo` needs Docker with compose v2 and the
+  Node that runs the script — no Node modules, no build, no toolchain — which is a smaller claim than the
+  one this section made and the only one the README should make.
+- **The screen capture is a VHS tape rendered in CI, not a hand-made capture.**
+  `demo/portcall-demo.tape` is the source; the `demo` job renders it on every push and
+  uploads the GIF as an artifact, and runs the demo as its own step first so that the render
+  can never publish a green-looking recording of a failure. `demo/portcall-demo.gif` is committed
+  by hand from one such green render; the build never produces it. CI does not diff the two — frame
+  timing is not reproducible enough to gate a build on — so the committed GIF goes stale
+  between refreshes, and says so wherever it is embedded.
+
 ## 12. Naming
 
 `portcall` — a ship's visit to a port: you arrive somewhere you don't own, and the first thing

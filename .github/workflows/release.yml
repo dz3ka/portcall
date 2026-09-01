@@ -1,0 +1,158 @@
+name: release
+
+# A pushed `v*` tag is the only trigger, and both halves of that are
+# load-bearing.
+#
+# *Only* - because this is the one file in the repo that asks for write
+# permissions, and confining it to a tag push means it can never run from a
+# pull request, a fork, or an issue comment.
+#
+# *`v*`* - because the tag ref is not just metadata here. Sigstore bakes the
+# workflow identity into the signing certificate as
+# `https://github.com/dz3ka/portcall/.github/workflows/release.yml@refs/tags/<tag>`,
+# and the command README tells a stranger to run pins that string with
+# `--certificate-identity-regexp '...release\.yml@refs/tags/v'`. Rename this
+# file, or trigger it on a branch, and that command stops matching - so the
+# filename and this trigger are public API (ADR-0048).
+on:
+  push:
+    tags: ['v*']
+
+# Read-only at the top level, so any job added to this file later starts with
+# no write scope and has to ask for it in a reviewable diff.
+permissions:
+  contents: read
+
+jobs:
+  release:
+    # One job on one runner, not a matrix: bun cross-compiles all five targets
+    # from a single host (ADR-0001), and `SHA256SUMS` covers all five, so there
+    # is exactly one manifest and it gets exactly one signature. A matrix would
+    # produce five certificates over five partial manifests, which is a worse
+    # thing to ask a stranger to verify.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # compile five targets, sign, upload: fail, don't hang
+    permissions:
+      # `contents: write` publishes the release. `id-token: write` is what makes
+      # keyless signing possible: it lets this job mint a short-lived GitHub
+      # OIDC token, which Fulcio exchanges for a signing certificate valid for
+      # ~10 minutes. No private key exists - not in this repo, not in a secret,
+      # not on any disk - so there is nothing to leak, rotate, or lose, and this
+      # job reads no repository secret at all: every step below runs on the
+      # job's own automatic token and the ambient OIDC token, nothing else.
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22 # same floating 22.x as ci.yml, above the >=22.18.0
+          # engines floor where Node turned on TypeScript type-stripping.
+          cache: npm
+      # Same pinned commit as ci.yml's `verify` and `binaries` jobs, for the
+      # same reason it is pinned there: every third-party action in this
+      # repo is pinned to a commit, never a tag, because a tag repoint would
+      # run someone else's code in the build that produces signed artifacts. The
+      # actions/* steps are GitHub-owned.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: npm ci
+      # The full gate runs again on the tag rather than trusting that master was
+      # green when the tag was cut. A tag can be pushed at any commit, including
+      # one that never went through a pull request, and the binaries built two
+      # steps down are what the world downloads.
+      #
+      # This is a single-OS run where ci.yml runs three; that is not a
+      # regression in coverage, because ci.yml has already covered all three on
+      # master. What this step catches is a tag pointing at an unverified
+      # commit.
+      - name: verify (profiles:check, lint, typecheck, test)
+        run: npm run verify
+      # Print the plan (targets, bun argv, output paths) before compiling, so a
+      # failure below can be read against the exact command that produced it.
+      - name: build plan
+        run: node scripts/build-binaries.mjs --dry-run
+      # Writes the five executables and `SHA256SUMS` into build/binaries/.
+      # `formatChecksums` (scripts/build-binaries.mjs) emits `sha256sum -c`
+      # format, lowercase hex, sorted by name - deterministic, so two builds of
+      # the same tree produce a byte-identical manifest.
+      - run: npm run build:binaries
+      # Re-check the manifest against the files on disk before signing it. The
+      # build script hashed each binary in memory immediately after compiling
+      # it; this reads both back off the filesystem. It is cheap, and it is the
+      # difference between signing "what the build believed it produced" and
+      # signing "what is actually about to be uploaded" - a truncated write or a
+      # half-flushed file would otherwise be signed and published as authentic.
+      - name: sha256sum -c the manifest before signing it
+        working-directory: build/binaries
+        run: sha256sum -c SHA256SUMS
+      # Pinned to a commit with the version in a trailing comment, same rule as
+      # setup-bun above. v4.1.2 installs cosign 3.0.6; the cosign version moves
+      # only when this pin moves, so a cosign release cannot silently change the
+      # signing behaviour of a portcall release.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      # Sign the manifest, not the binaries (ADR-0048). `SHA256SUMS` already
+      # commits to all five executables by digest, so one signature covers the
+      # whole release and a stranger verifies with one cosign command plus one
+      # sha256sum - rather than five verify-blob invocations. The binaries
+      # themselves stay unsigned until v2, exactly as the README says: no
+      # Authenticode certificate, no Apple notarisation.
+      #
+      # `--yes` skips the confirmation prompt (cosign prompts before writing to
+      # the public Rekor transparency log; there is no TTY here to answer it).
+      # `--bundle` writes everything a verifier needs - signature, Fulcio
+      # certificate, and the Rekor inclusion proof - into one file, which is
+      # what `verify-blob --bundle` consumes. cosign 3 removed the flags that
+      # split those into separate outputs (`--output-signature`,
+      # `--output-certificate`, `--b64`, `--new-bundle-format`), so a bundle is
+      # now the only shape this comes in.
+      #
+      # No `--key` and no `--identity-token`: with `id-token: write` granted,
+      # cosign finds the ambient GitHub OIDC token by itself.
+      - name: sign SHA256SUMS (Sigstore keyless, GitHub OIDC)
+        run: |
+          cosign sign-blob --yes \
+            --bundle build/binaries/SHA256SUMS.cosign.bundle \
+            build/binaries/SHA256SUMS
+      # Run the *stranger's* command, verbatim, against the files that are about
+      # to be uploaded - before uploading them. This is the only check that
+      # exercises the identity regexp the README publishes; if this file is ever
+      # renamed, or the trigger widened off `refs/tags/v*`, the certificate SAN
+      # stops matching and the release fails here instead of shipping assets
+      # whose documented verification command does not work.
+      #
+      # The repository is spelled out rather than interpolated from
+      # `github.repository` on purpose: interpolating would make this step pass
+      # in any fork while the published README command still names dz3ka. A
+      # fork that wants signed releases has to edit this line and the README
+      # together, which is the correct amount of friction.
+      - name: verify the signature the way the README tells a stranger to
+        run: |
+          cosign verify-blob build/binaries/SHA256SUMS \
+            --bundle build/binaries/SHA256SUMS.cosign.bundle \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp '^https://github\.com/dz3ka/portcall/\.github/workflows/release\.yml@refs/tags/v'
+      # The seven published assets, named one by one rather than globbed. ci.yml
+      # uploads `build/binaries/**` as a throwaway artifact and a glob is right
+      # there; a release is the opposite case. A glob publishes whatever
+      # happens to be in the directory, and the whole claim being made here is
+      # that the published set is exactly the set the manifest covers, plus the
+      # manifest and its signature. Adding a sixth target should be a diff in
+      # this file too.
+      #
+      # `${{ github.token }}` is the job's own automatic token, scoped by the
+      # `contents: write` above. It is not a personal access token and not a
+      # repository secret.
+      - name: create the release and upload the assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            build/binaries/portcall-darwin-arm64 \
+            build/binaries/portcall-darwin-x64 \
+            build/binaries/portcall-linux-x64 \
+            build/binaries/portcall-linux-arm64 \
+            build/binaries/portcall-win-x64.exe \
+            build/binaries/SHA256SUMS \
+            build/binaries/SHA256SUMS.cosign.bundle

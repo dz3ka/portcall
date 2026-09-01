@@ -19,6 +19,21 @@ only.
 ## Running it
 
 ```sh
+npm run demo
+```
+
+That is the whole demo: it runs the four commands below, with the run step
+pointed at the CLI instead of the test suite, and tears the network down
+afterwards on every path including failure. It **requires the check to exit 2**
+(`blocker`, ADR-0006) - this network plants a re-signing proxy and a root the
+container trusts that node does not, so a run that finds nothing has
+demonstrated nothing (ADR-0046). The profile it checks against is
+`demo-profile.yaml` in this directory, which is also the profile the integration
+suite runs on.
+
+To run the suite rather than the demo, or to drive a single step by hand:
+
+```sh
 docker compose -f test/harness/docker-compose.yml up --wait
 docker compose -f test/harness/docker-compose.yml build portcall   # before *every* run
 docker compose -f test/harness/docker-compose.yml run --rm portcall
@@ -179,6 +194,23 @@ network that exists for the length of a test run, and none of it is committed.
   install lives in an entrypoint that exists only inside the harness image, it
   reads a read-only mount, and the container is `--rm`'d after the run
   (SPEC.md §4).
+- **`npm run demo` cannot clean up after a Ctrl-C.** Interrupting it kills the
+  script along with the compose command it is waiting on, so the network and
+  the `mitm-ca` volume survive. Every other path - a failed `up`, a check that
+  exited something other than 2, an unexpected throw - tears down. After an
+  interrupt, finish it by hand:
+  ```sh
+  docker compose -f test/harness/docker-compose.yml down -v --remove-orphans
+  ```
+- **The subnet is hard-coded and a collision is compose's error, not ours.**
+  `10.31.0.0/24` is fixed in `docker-compose.yml` and repeated in
+  `dns/dnsmasq.conf`; making it configurable would mean templating the DNS zone.
+  On a machine already using that range, `up --wait` fails with compose's own
+  "Pool overlaps with other one on this address space" and `npm run demo` adds
+  one line naming the range and pointing here (ADR-0046). A collision with a
+  *host* route or a VPN rather than another Docker network is not detectable
+  without platform-specific commands, and is not guessed at: the symptom is
+  services that come up and then cannot reach each other.
 - **No TLS-version scenario.** Provoking `tls.protocol-below-minimum` needs a
   peer that will still negotiate TLS 1.0, which modern OpenSSL builds will not
   do without being compiled for it. That class is covered by the recorded-chain

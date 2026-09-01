@@ -1,0 +1,43 @@
+# Anthropic Claude Code. Every endpoint below is one row of the vendor's own
+# published network-access table, and the `# source:` line above it is that
+# citation. An endpoint that cannot be cited does not ship: declaring a host is
+# exactly what makes portcall contact it, so a
+# hostname recalled rather than read would be unauthorised egress on somebody
+# else's network (ADR-0043).
+#
+# Deliberately absent: the two Datadog intake hosts the same table lists. They
+# carry optional operational telemetry, and a tool that exists to answer "what
+# is this network blocking" has no business asking a customer to unblock an
+# analytics endpoint.
+name: Anthropic Claude Code
+endpoints:
+  # source: https://code.claude.com/docs/en/network-config
+  - host: api.anthropic.com
+    port: 443
+    purpose: model inference
+    required: true
+    expect_streaming: true
+  # source: https://code.claude.com/docs/en/network-config
+  - host: platform.claude.com
+    port: 443
+    purpose: OAuth token exchange, refresh and revocation
+    required: true
+  # source: https://code.claude.com/docs/en/network-config
+  - host: claude.ai
+    port: 443
+    purpose: claude.ai account authentication
+    required: false          # a Console or API-key sign-in never reaches it
+  # source: https://code.claude.com/docs/en/network-config
+  - host: downloads.claude.ai
+    port: 443
+    purpose: native installer, auto-updater and plugin downloads
+    required: false
+  # source: https://code.claude.com/docs/en/network-config
+  - host: registry.npmjs.org
+    port: 443
+    purpose: npm and bun installs, plugin packages, npx-launched MCP servers
+    required: false
+runtimes: [node]           # which trust stores to cross-check
+tls:
+  min_version: "1.2"
+  interception_tolerated: true   # documented to work behind a re-signing proxy

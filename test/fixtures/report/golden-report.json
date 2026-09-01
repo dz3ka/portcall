@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "tool": {
+    "name": "portcall",
+    "version": "0.1.0"
+  },
+  "generatedAt": "2026-01-01T00:00:00.000Z",
+  "durationMs": 1843,
+  "redacted": true,
+  "platform": {
+    "os": "darwin",
+    "arch": "arm64",
+    "runtime": "node",
+    "runtimeVersion": "22.18.0"
+  },
+  "profile": {
+    "id": "golden",
+    "name": "Golden fixture profile",
+    "source": "builtin",
+    "endpoints": 3,
+    "runtimes": [
+      "node",
+      "java"
+    ]
+  },
+  "summary": {
+    "severity": "blocker",
+    "total": 4,
+    "blocker": 1,
+    "degraded": 1,
+    "unknown": 1,
+    "ok": 1
+  },
+  "findings": [
+    {
+      "id": "truststore.node.missing-root",
+      "probe": "truststore",
+      "severity": "blocker",
+      "title": "Node does not trust a root this machine trusts",
+      "remediation": "Export the root and point NODE_EXTRA_CA_CERTS at it, then re-run.",
+      "docs": "https://example.com/docs/truststore-missing-root",
+      "evidence": [
+        {
+          "label": "endpoint",
+          "kind": "hostname",
+          "value": "<host:23f5e1726aa3>"
+        },
+        {
+          "label": "resolved address",
+          "kind": "ip",
+          "value": "<ip:5d0e9228eae1>"
+        },
+        {
+          "label": "anchor",
+          "kind": "dn",
+          "value": "<dn:d756a6ab130c>"
+        }
+      ]
+    },
+    {
+      "id": "tls.intercepted-via-proxy",
+      "probe": "tls",
+      "severity": "degraded",
+      "title": "The chain seen through the proxy is not the chain seen directly",
+      "remediation": "Add the interception CA to every runtime bundle the profile declares.",
+      "docs": "https://example.com/docs/tls-intercepted",
+      "evidence": [
+        {
+          "label": "pac url",
+          "kind": "url",
+          "value": "<url:3a9314d984c3>"
+        },
+        {
+          "label": "leaf serial",
+          "kind": "serial",
+          "value": "<serial:92fb13f31a79>"
+        },
+        {
+          "label": "bundle",
+          "kind": "path",
+          "value": "<path:b81971a1ce5e>"
+        }
+      ]
+    },
+    {
+      "id": "proxy.pac-inconclusive",
+      "probe": "proxy",
+      "severity": "unknown",
+      "title": "The PAC script returned no usable verdict",
+      "evidence": [
+        {
+          "label": "proxy user",
+          "kind": "username",
+          "value": "<user:0a38f5e30950>"
+        },
+        {
+          "label": "phase",
+          "kind": "text",
+          "value": "evaluation timed out"
+        }
+      ]
+    },
+    {
+      "id": "egress.reachable",
+      "probe": "egress",
+      "severity": "ok",
+      "title": "Every required endpoint answered",
+      "evidence": [
+        {
+          "label": "endpoint",
+          "kind": "public",
+          "value": "api.anthropic.com"
+        },
+        {
+          "label": "endpoints reached",
+          "kind": "number",
+          "value": "3"
+        }
+      ]
+    }
+  ]
+}

@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { renderHtml, escapeHtml } from '../src/report/html.ts';
+import { renderJson } from '../src/report/json.ts';
 import { redact } from '../src/redact/index.ts';
-import { buildReport, finding } from './helpers/report-fixture.ts';
+import { buildReport, finding, goldenReport } from './helpers/report-fixture.ts';
 
 describe('escapeHtml', () => {
   it('escapes all five special characters', () => {
@@ -92,5 +95,73 @@ describe('renderHtml', () => {
     expect(html).not.toContain('<link');
     expect(html).not.toContain('url(');
     expect(html).not.toContain('@import');
+  });
+});
+
+/**
+ * The golden report (`test/fixtures/report/golden-report.json`): one finding
+ * per severity, evidence covering every `EvidenceKind`, redacted with a fixed
+ * salt. The fixture is the *rendered JSON* of that report, so it pins the whole
+ * document — `REPORT_SCHEMA_VERSION` is public API and report-json.test.ts pins
+ * key order but never the bytes around it — and the same in-memory report is
+ * what the tests below render to HTML.
+ *
+ * There is deliberately no committed golden HTML and no `UPDATE_GOLDEN` mode. A
+ * golden that regenerates itself on a red run catches nothing; regenerate this
+ * one on purpose, then read the diff before committing it:
+ *
+ *   node --input-type=module -e "import {writeFileSync} from 'node:fs'; import {goldenReport} from './test/helpers/report-fixture.ts'; import {redact} from './src/redact/index.ts'; import {renderJson} from './src/report/json.ts'; writeFileSync('test/fixtures/report/golden-report.json', renderJson(redact(goldenReport(), {enabled: true, salt: 'fixed-salt'})) + '\n')"
+ *
+ * Line endings: the fixture is compared newline-agnostically (CRLF folded to
+ * LF, trailing whitespace trimmed on both sides). The repo has no
+ * `.gitattributes`, so a Windows checkout under `core.autocrlf=true` rewrites
+ * the committed file and would otherwise redden `verify` on line endings alone.
+ * No value in the report contains a newline, so folding cannot mask a real
+ * difference.
+ */
+const GOLDEN_PATH = join(import.meta.dirname, 'fixtures', 'report', 'golden-report.json');
+
+function normaliseNewlines(text: string): string {
+  return text.replace(/\r\n/g, '\n').trimEnd();
+}
+
+describe('the golden report', () => {
+  const redacted = redact(goldenReport(), { enabled: true, salt: 'fixed-salt' });
+
+  it('renders JSON byte for byte identical to the committed fixture', () => {
+    const golden = readFileSync(GOLDEN_PATH, 'utf8');
+    expect(normaliseNewlines(renderJson(redacted))).toBe(normaliseNewlines(golden));
+  });
+
+  it('names every severity in the HTML render', () => {
+    const html = renderHtml(redacted);
+    expect(html).toContain('<span class="badge blocker">Blocker</span>');
+    expect(html).toContain('<span class="badge degraded">Degraded</span>');
+    expect(html).toContain('<span class="badge unknown">Unknown</span>');
+    expect(html).toContain('<span class="badge ok">OK</span>');
+  });
+
+  it('carries every evidence value the JSON carries into the HTML render', () => {
+    const html = renderHtml(redacted);
+    for (const item of redacted.findings) {
+      for (const evidence of item.evidence) {
+        expect(html).toContain(escapeHtml(evidence.value));
+      }
+    }
+  });
+
+  it('leaks no pre-redaction identifier into the HTML render', () => {
+    const html = renderHtml(redacted);
+    for (const value of [
+      'api.internal.example',
+      '10.31.0.9',
+      'Acme Corp',
+      'wpad.internal.example',
+      '04:9e:2b:11',
+      '/etc/ssl/certs',
+      'svc-buildbot',
+    ]) {
+      expect(html).not.toContain(value);
+    }
   });
 });

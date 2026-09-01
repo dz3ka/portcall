@@ -159,6 +159,15 @@ jobs:
       # would not (it binds the listener before writing the root).
       - name: bring up the hostile network
         run: docker compose -f test/harness/docker-compose.yml up --wait
+      # The image bakes the repo with `COPY . .` and nothing is bind-mounted, so
+      # the image has to postdate the checkout. `up --wait` builds it when no
+      # image exists at all, which is always true on a fresh runner - so this
+      # job was right by accident, not wrong. It is stated explicitly because
+      # "always true on a fresh runner" is a property of the runner, not of this
+      # workflow, and `scripts/demo.mjs` runs the same four commands in the same
+      # order for the same reason.
+      - name: build the portcall image against this checkout
+        run: docker compose -f test/harness/docker-compose.yml build portcall
       # `run` and not `exec`: the suite is profile-gated in the compose file so
       # that `up --wait` never starts it, and `run --rm` propagates vitest's
       # exit code as this step's.
@@ -177,6 +186,60 @@ jobs:
         if: always()
         run: docker compose -f test/harness/docker-compose.yml down -v --remove-orphans
 
+  demo:
+    # The recording that SPEC.md §11 asks for, rendered rather than screen-
+    # captured by hand: `demo/portcall-demo.tape` drives `npm run demo`, which
+    # is a real `portcall check` inside the harness network above (ADR-0046).
+    #
+    # A dedicated job for the same reason `truststore-proof` is one: a red
+    # `demo` names the exact claim that broke - "one command shows the product
+    # naming what is wrong with this network" - where the same failure folded
+    # into `harness` would read as the integration suite going red.
+    #
+    # ubuntu-only for the reason `harness` is: the Windows and macOS runners
+    # have no Linux Docker daemon, and there is nothing host-OS dependent about
+    # a recording.
+    runs-on: ubuntu-latest
+    # 35, not `harness`'s 20: this job pays for two full compose cycles - the
+    # assertion step below, and a second one the tape drives inside the render.
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      # No setup-node and no `npm ci`, same as `harness`: the demo shells out to
+      # `docker compose`, and the product is built and run inside the container.
+      # The runner's own node is only what executes the 200-line script.
+      #
+      # THIS step is the assertion, and it is why it comes first. `vhs` exits 0
+      # whether the command it recorded succeeded or failed, so a job whose only
+      # step were the render below would publish a GIF of a stack trace under a
+      # green tick - the "green until it matters" shape. Running the demo on its
+      # own first means a broken demo reddens CI here, on ADR-0046's exit-2
+      # assertion, and the tape step is left doing only what it is good at.
+      - name: npm run demo (the assertion; the render below asserts nothing)
+        run: node scripts/demo.mjs
+      # Pinned to a commit like `oven-sh/setup-bun` above, and for the same
+      # reason: third-party action, mutable tag.
+      #
+      # `install-fonts` because a bare runner has no font matching the tape's
+      # default family, and fontconfig's substitute is whatever it happens to
+      # pick that day - which changes the glyph metrics, and so the frames,
+      # between runs of an identical tape.
+      - uses: charmbracelet/vhs-action@f6d7db07a432fcd3b06772628d36a57f96d95dcf # v2.1.1
+        with:
+          path: demo/portcall-demo.tape
+          install-fonts: true
+      # The artifact is the deliverable of this job. It is *not* compared
+      # against `demo/portcall-demo.gif` in the repo: frame timing here depends
+      # on how long Docker took, so a diff would flake on every run and teach
+      # everyone to ignore it. The committed GIF is a hand-refreshed snapshot of
+      # one of these artifacts, and is described that way where it is embedded
+      # (ADR-0047).
+      - uses: actions/upload-artifact@v7
+        with:
+          name: portcall-demo-gif
+          path: demo/portcall-demo.gif
+          if-no-files-found: error
+
   binaries:
     # bun cross-compiles all five targets from a single runner (ADR-0001), so
     # this job is not a matrix. bun is a build-time dependency only; nothing on
@@ -189,9 +252,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      # Pinned to a commit, not the mutable v2 tag: this is the one third-party
-      # action in the workflow, and a tag repoint would run someone else's code
-      # in the release build. The actions/* steps above are GitHub-owned.
+      # Pinned to a commit, not the mutable v2 tag: every third-party action
+      # here is pinned to a commit, never a tag, because a tag repoint would run
+      # someone else's code in the release build. The actions/* steps above are
+      # GitHub-owned.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - run: npm ci
       # Print the plan (targets, bun argv, output paths) before compiling, so a
