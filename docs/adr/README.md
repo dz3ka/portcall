@@ -15,6 +15,21 @@ Numbering is sequential at creation (`NNNN-kebab-title.md`). Status is one of:
 > Decisions after 0006 take their numbers at the milestone whose code forces
 > them, not before.
 
+> Note: there is no ADR-0035, and nothing is missing. The number was allocated
+> during M4 and never used; it is cited nowhere in the tree. The sequence skips
+> it deliberately rather than renumbering, because 0036 onwards are already
+> cited from `src/` and 0038–0040 are already public in the history — moving a
+> number would point every one of those citations at the wrong document.
+
+> Note: ADR-0039's `Status:` line records that ADR-0037 was cited from `src/`
+> but "not yet written up in this directory". That was true on the day 0039 was
+> accepted and is no longer true: 0033, 0034, 0036 and 0037 were written up
+> during M4 from their own commits and the code that cites them, and every
+> `ADR-NNNN` occurrence in the tree now resolves to a file here. 0039 is left
+> exactly as written, because an Accepted ADR is immutable and its disclaimer is
+> an honest record of what the directory held at the time - read that line as
+> history, not as the directory's current state.
+
 > Note: ADR-0002 was written in M0, ahead of the code it governs, because it
 > constrains the finding model and the fixture format that M0 ships. Its
 > dependency landed in M3: `src/probes/tls/evaluate.ts` and
@@ -78,6 +93,11 @@ Numbering is sequential at creation (`NNNN-kebab-title.md`). Status is one of:
 | [0030](0030-the-harness-zone-is-ipv4-only-and-aaaa-is-unanswered.md) | The harness zone is IPv4-only, and AAAA is left unanswered | Accepted |
 | [0031](0031-cross-runtime-parity-is-a-verdict-claim-not-a-bundle-claim.md) | Cross-runtime parity is a verdict claim, not a bundle claim | Accepted |
 | [0032](0032-per-store-os-unreadable-not-one-aggregate.md) | An unreadable OS store gets its own finding, not a shared aggregate | Accepted |
+| [0033](0033-the-os-trust-store-is-read-through-a-pinned-argv-table.md) | The OS trust store is read through a pinned argv table, not a banned word | Accepted |
+| [0034](0034-the-tls-probe-hands-the-anchor-it-observed-to-the-run.md) | The `tls` probe hands the anchor it observed to the rest of the run | Accepted |
+| [0036](0036-java-keystores-are-parsed-in-process-and-never-unlocked.md) | Java keystores are parsed in-process, and portcall never supplies a password | Accepted |
+| [0037](0037-each-trust-store-gets-its-own-slice-of-the-runs-remaining-time.md) | Each trust store gets its own slice of the run's remaining time | Accepted |
 | [0038](0038-correlated-anchors-take-evidence-priority-in-missing-root-truncation.md) | Correlated anchors take evidence priority over alphabetical order in truststore missing-root findings | Accepted |
 | [0039](0039-the-windows-machine-root-budget-is-set-from-a-563-root-host.md) | The `windows-machine-root` read budget is set from a 563-root host, not a 41-root laptop | Accepted |
 | [0040](0040-the-trust-store-reader-hands-powershell-a-null-module-analysis-cache-path.md) | The trust-store reader hands PowerShell a null module-analysis cache path | Accepted |
+| [0041](0041-the-harness-plants-its-os-trust-store-at-container-start.md) | The harness plants its OS trust store at container start, and stays a Node-only profile | Accepted |

@@ -19,6 +19,21 @@ import { defineConfig } from 'vitest/config';
  * anywhere the injection did not happen, so a developer running it by
  * accident on a laptop gets a loud, actionable error rather than a silent
  * false pass.
+ *
+ * **`readMs` is not printed by this suite, so ADR-0039's promised re-measurement
+ * of the `windows-machine-root` budget is answered here only by proxy.** The
+ * shipped code does report it - `read took (ms)` is finding evidence
+ * (`src/probes/truststore/evaluate.ts:330`) - but this suite asserts on verdicts
+ * and never renders a finding into the job log, so a normal `truststore-proof`
+ * run yields no number to set against `60_000`. What it yields is a ceiling
+ * instead: the six tests complete in ~57.3 s wall, `beforeAll` included, so no
+ * single read inside them came near the per-read budget. That is enough to say
+ * the budget is not clipping a healthy read, and not enough to revise the
+ * number. Making it direct is one line in the `beforeAll` printing each
+ * outcome's `readMs`; it is recorded here rather than added, and whoever next
+ * revises that budget should add it first - ADR-0039's closing warning is that
+ * the cold read is the figure that has never been measured to completion, and a
+ * proxy cannot measure it either.
  */
 export default defineConfig({
   test: {
